@@ -18,7 +18,6 @@ import aws_cdk as cdk
 from aws_cdk import CfnOutput, Duration, RemovalPolicy, Stack
 from aws_cdk import aws_aps as aps
 from aws_cdk import aws_codebuild as codebuild
-from aws_cdk import aws_config as config_
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_ecr as ecr
 from aws_cdk import aws_iam as iam
@@ -257,6 +256,14 @@ class PlatformStack(Stack):
         )
         self.image_repo.grant_pull_push(self.codebuild_project)
         self.lambda_repo.grant_pull_push(self.codebuild_project)
+        # buildspec's post_build resolves pushed digests via `ecr describe-images`
+        # so it can update SSM params + roll AgentCore Runtime / Lambdas.
+        self.codebuild_project.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["ecr:DescribeImages"],
+                resources=[self.image_repo.repository_arn, self.lambda_repo.repository_arn],
+            )
+        )
         self.codebuild_project.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["ssm:PutParameter", "ssm:GetParameter", "ssm:AddTagsToResource"],
@@ -394,8 +401,14 @@ class PlatformStack(Stack):
             self.osis_ingest_endpoint = cdk.Fn.select(0, otel.pipeline.attr_ingest_endpoint_urls)
 
         # ------------------------------------------------------------------
-        # Config rule — continuous tag drift detection.
-        # Assumes an account-level Config recorder is already running.
+        # Tag drift notifications — SNS topic retained as an email hook for
+        # any future drift alerting. The AWS Config rule that previously fed
+        # this topic was removed: CfnConfigurationRecorder does not reach
+        # CREATE_COMPLETE in CloudFormation until `recording=true`, which in
+        # turn can't happen until a DeliveryChannel exists — producing a
+        # chicken-and-egg that stalls the stack for hours. Tag enforcement
+        # remains two-layered: (1) CDK Tags.of(app).add aspect at synth,
+        # (2) IAM permission boundary at request time.
         # ------------------------------------------------------------------
         tag_alarm_topic = sns.Topic(
             self,
@@ -405,18 +418,6 @@ class PlatformStack(Stack):
         )
         if email_to:
             tag_alarm_topic.add_subscription(sns_subs.EmailSubscription(email_to))
-
-        config_.ManagedRule(
-            self,
-            "RequiredTagsRule",
-            identifier=config_.ManagedRuleIdentifiers.REQUIRED_TAGS,
-            config_rule_name="aihedge-required-tags",
-            input_parameters={
-                "tag1Key": "UsedBy",
-                "tag1Value": "AIHedge",
-            },
-            description="Every AI-HedgeFund resource must carry UsedBy=AIHedge",
-        )
 
         # ------------------------------------------------------------------
         # Outputs consumed by app_stack.

@@ -34,12 +34,12 @@ phases:
     commands:
       - docker buildx create --use --name aihedgebuilder 2>/dev/null || docker buildx use aihedgebuilder
       - docker buildx inspect --bootstrap
-      # AgentCore + Fargate image
+      # AgentCore + Fargate image. ECR repos are IMMUTABLE so only push the
+      # git-sha tag — a fixed `:latest` tag would fail on re-push.
       - docker buildx build
           --platform "$IMAGE_PLATFORM"
           --provenance=false
           --file Dockerfile.agentcore
-          --tag "$ECR_URI_APP:latest"
           --tag "$ECR_URI_APP:$SHORT_SHA"
           --push
           .
@@ -48,7 +48,6 @@ phases:
           --platform "$IMAGE_PLATFORM"
           --provenance=false
           --file Dockerfile.lambda
-          --tag "$ECR_URI_LAMBDA:latest"
           --tag "$ECR_URI_LAMBDA:$SHORT_SHA"
           --push
           .
