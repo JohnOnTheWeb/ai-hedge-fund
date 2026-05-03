@@ -15,7 +15,6 @@
         "ec2:CreateVolume",
         "ec2:CreateSecurityGroup",
         "ec2:CreateVpcEndpoint",
-        "ecs:RunTask",
         "ecs:CreateCluster",
         "ecs:CreateService",
         "ecs:RegisterTaskDefinition",

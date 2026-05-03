@@ -38,6 +38,10 @@ def call_tool(target: str, tool: str, arguments: dict[str, Any]) -> Any:
     packages aren't affected.
     """
     endpoint = os.environ["AIHEDGE_GATEWAY_URL"].rstrip("/")
+    # AgentCore's GatewayUrl attribute already ends with "/mcp" — don't
+    # double it when constructing the tools/call endpoint.
+    if endpoint.endswith("/mcp"):
+        endpoint = endpoint[: -len("/mcp")]
     region = os.environ.get("AIHEDGE_GATEWAY_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
     namespaced = f"{target}___{tool}"
     body = json.dumps({"name": namespaced, "arguments": arguments}).encode("utf-8")

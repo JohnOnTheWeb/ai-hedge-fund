@@ -149,7 +149,10 @@ class AppStack(Stack):
         runtime_role.add_to_policy(
             iam.PolicyStatement(
                 actions=["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
-                resources=[platform.md_store_secret.secret_arn],
+                resources=[
+                    platform.md_store_secret.secret_arn,
+                    platform.financial_datasets_secret.secret_arn,
+                ],
             )
         )
         # ECR pull permissions. GetAuthorizationToken must be on "*" (it's a
@@ -211,6 +214,13 @@ class AppStack(Stack):
             iam.PolicyStatement(
                 actions=["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
                 resources=[platform.financial_datasets_secret.secret_arn],
+            )
+        )
+        # Secrets are KMS-encrypted with the platform CMK — need decrypt.
+        lambda_data_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["kms:Decrypt", "kms:DescribeKey"],
+                resources=[platform.cmk.key_arn],
             )
         )
 
@@ -350,7 +360,7 @@ class AppStack(Stack):
         )
         task_def.add_container(
             "driver",
-            image=ecs.ContainerImage.from_ecr_repository(platform.image_repo, image_digest),
+            image=ecs.ContainerImage.from_ecr_repository(platform.image_repo, image_tag),
             command=["python", "-m", "deploy.app.task_runner"],
             logging=ecs.LogDrivers.aws_logs(
                 stream_prefix="analyst-driver",
@@ -411,6 +421,13 @@ class AppStack(Stack):
             )
         )
         self.summary_topic.grant_publish(glue_role)
+        # SNS topic is CMK-encrypted — Publish needs GenerateDataKey on the CMK.
+        glue_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["kms:GenerateDataKey", "kms:Decrypt", "kms:DescribeKey"],
+                resources=[platform.cmk.key_arn],
+            )
+        )
 
         get_config_fn = _lambda(
             "GetConfig",
