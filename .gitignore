@@ -8,6 +8,11 @@ env/
 build/
 develop-eggs/
 dist/
+
+# CDK synth output + local venv (context file IS tracked — it caches ssm lookups)
+infra/cdk.out/
+infra/.venv/
+infra/cdk.context.json
 downloads/
 eggs/
 .eggs/

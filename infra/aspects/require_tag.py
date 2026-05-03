@@ -25,7 +25,10 @@ _UNTAGGABLE_TYPES: frozenset[str] = frozenset(
         "AWS::IAM::ManagedPolicy",
         # Service-linked roles are AWS-managed.
         "AWS::IAM::ServiceLinkedRole",
-        # APIGW integrations/routes inherit from the API.
+        # APIGW v2 L1 tagging is driven by Tags dict that CDK renders at
+        # deploy-time, not the visitor-accessible list — visiting the L1
+        # yields no tags even when cdk.Tags.of(api).add(...) was called.
+        "AWS::ApiGatewayV2::Api",
         "AWS::ApiGatewayV2::Integration",
         "AWS::ApiGatewayV2::Route",
         "AWS::ApiGatewayV2::Deployment",
@@ -49,7 +52,13 @@ class MissingRequiredTagError(Exception):
 
 @jsii.implements(IAspect)
 class RequireTag:
-    """Fails synth if any taggable CfnResource lacks the required tag."""
+    """Fails synth if any taggable CfnResource lacks the required tag.
+
+    Resources without a `tags` attribute are silently skipped — CDK decides
+    which L1s support tagging and which don't, and we mirror that here by
+    asking the CfnResource itself (via `hasattr(node, "tags")`) rather than
+    hard-coding a type allow-list.
+    """
 
     def __init__(self, key: str, value: str) -> None:
         self._key = key
@@ -60,21 +69,36 @@ class RequireTag:
             return
         if node.cfn_resource_type in _UNTAGGABLE_TYPES:
             return
-        tags = node.tags.render_tags() if node.tags else None
+        # Many L1 Cfn* classes don't expose a `tags` property at all
+        # (e.g. CfnSubnetRouteTableAssociation, CfnRoute, CfnGatewayAttachment).
+        # Skip them — CDK's type metadata already tells us these aren't taggable.
+        if not hasattr(node, "tags"):
+            return
+        tags_obj = getattr(node, "tags", None)
+        render = getattr(tags_obj, "render_tags", None)
+        if render is None:
+            return
+        tags = render()
         if not tags:
             raise MissingRequiredTagError(
                 f"{node.node.path} ({node.cfn_resource_type}) has no tags; "
                 f"expected {self._key}={self._value}"
             )
         for tag in tags:
-            if tag.get("key") == self._key or tag.get("Key") == self._key:
-                actual = tag.get("value") or tag.get("Value")
-                if actual == self._value:
-                    return
-                raise MissingRequiredTagError(
-                    f"{node.node.path} ({node.cfn_resource_type}) has "
-                    f"{self._key}={actual}; expected {self._value}"
-                )
+            if not isinstance(tag, dict):
+                # Some CDK L1s render tags as strings or intrinsic tokens;
+                # can't verify those at synth, so skip.
+                continue
+            tag_key = tag.get("key") or tag.get("Key")
+            if tag_key != self._key:
+                continue
+            actual = tag.get("value") or tag.get("Value")
+            if actual == self._value:
+                return
+            raise MissingRequiredTagError(
+                f"{node.node.path} ({node.cfn_resource_type}) has "
+                f"{self._key}={actual}; expected {self._value}"
+            )
         raise MissingRequiredTagError(
             f"{node.node.path} ({node.cfn_resource_type}) is missing "
             f"required tag {self._key}={self._value}"

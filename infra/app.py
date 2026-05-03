@@ -19,7 +19,6 @@ import os
 import aws_cdk as cdk
 from cdk_nag import AwsSolutionsChecks, NagSuppressions
 
-from aspects.apply_default_tag import ApplyDefaultTag
 from aspects.require_tag import RequireTag
 from stacks.app_stack import AppStack
 from stacks.platform_stack import PlatformStack
@@ -27,12 +26,18 @@ from stacks.platform_stack import PlatformStack
 app = cdk.App()
 
 env = cdk.Environment(
-    account=os.environ.get("CDK_DEFAULT_ACCOUNT", "264207762605"),
+    account=os.environ.get("CDK_DEFAULT_ACCOUNT", "590183796434"),
     region=os.environ.get("CDK_DEFAULT_REGION", "us-east-1"),
 )
 
 tag_key = app.node.try_get_context("aihedge:tag") or "UsedBy"
 tag_value = app.node.try_get_context("aihedge:tagValue") or "AIHedge"
+
+# Apply the mandatory tag at the app root BEFORE instantiating stacks, so the
+# tag is baked into every taggable construct's properties at construct time.
+# Using cdk.Tags.of(...).add(...) directly is the supported pattern; a visitor
+# aspect runs late and the RequireTag aspect sees it pre-tag.
+cdk.Tags.of(app).add(tag_key, tag_value)
 
 platform = PlatformStack(
     app,
@@ -50,9 +55,10 @@ app_stack = AppStack(
 )
 app_stack.add_dependency(platform)
 
-# Two synth-time enforcement passes. Order matters: apply the tag first so the
-# require-tag aspect sees it when it walks the tree.
-cdk.Aspects.of(app).add(ApplyDefaultTag(key=tag_key, value=tag_value))
+# Synth-time tag enforcement: after stacks are instantiated, verify every
+# taggable resource carries the tag. ApplyDefaultTag was folded into the
+# pre-stack-instantiation cdk.Tags.of(app).add(...) above; this aspect only
+# validates — it doesn't mutate.
 cdk.Aspects.of(app).add(RequireTag(key=tag_key, value=tag_value))
 
 # cdk-nag surfaces obvious security findings at synth. Suppressions are narrow

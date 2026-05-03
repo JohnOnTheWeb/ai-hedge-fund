@@ -85,7 +85,13 @@ class OtelPipeline(Construct):
             tags=[{"key": "UsedBy", "value": "AIHedge"}],
         )
 
-        CfnOutput(self, "OsisIngestEndpoint", value=f"https://{self.pipeline.attr_ingest_endpoint_urls}")
+        import aws_cdk as cdk  # local import avoids circularity at module load
+
+        CfnOutput(
+            self,
+            "OsisIngestEndpoint",
+            value=cdk.Fn.select(0, self.pipeline.attr_ingest_endpoint_urls),
+        )
         CfnOutput(self, "OpenSearchDomainEndpoint", value=domain.domain_endpoint)
 
     @staticmethod

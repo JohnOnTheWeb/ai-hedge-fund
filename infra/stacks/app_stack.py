@@ -32,7 +32,7 @@ from aws_cdk import aws_stepfunctions as sfn
 from aws_cdk import aws_stepfunctions_tasks as sfn_tasks
 from constructs import Construct
 
-from constructs.agent_runtime import AgentRuntimeBundle, LambdaTargetSpec
+from aihedge_constructs.agent_runtime import AgentRuntimeBundle, LambdaTargetSpec
 from stacks.platform_stack import PlatformStack
 
 _STATE_MACHINE_DEF = Path(__file__).resolve().parent.parent.parent / "statemachine" / "aihedge_run.asl.json"
@@ -103,6 +103,7 @@ class AppStack(Stack):
             self,
             "RunSummaryTopic",
             topic_name="aihedge-run-summary",
+            master_key=platform.cmk,
         )
         if email_to:
             self.summary_topic.add_subscription(sns_subs.EmailSubscription(email_to))
@@ -135,8 +136,26 @@ class AppStack(Stack):
                 resources=[f"arn:aws:bedrock-agentcore:{self.region}:{self.account}:gateway/*"],
             )
         )
-        platform.md_store_secret.grant_read(runtime_role)
-        platform.image_repo.grant_pull(runtime_role)
+        # Avoid cross-stack grants (they create platform→app resource-policy
+        # references that cycle back). Add policies to the role directly; the
+        # resource side doesn't need to know about us.
+        runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
+                resources=[platform.md_store_secret.secret_arn],
+            )
+        )
+        runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "ecr:BatchCheckLayerAvailability",
+                    "ecr:GetDownloadUrlForLayer",
+                    "ecr:BatchGetImage",
+                    "ecr:GetAuthorizationToken",
+                ],
+                resources=[platform.image_repo.repository_arn, "*"],
+            )
+        )
         runtime_role.add_to_policy(
             iam.PolicyStatement(
                 actions=["logs:CreateLogStream", "logs:PutLogEvents"],
@@ -159,7 +178,12 @@ class AppStack(Stack):
             permissions_boundary=platform.permission_boundary,
             managed_policies=[iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole")],
         )
-        platform.financial_datasets_secret.grant_read(lambda_data_role)
+        lambda_data_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
+                resources=[platform.financial_datasets_secret.secret_arn],
+            )
+        )
 
         lambda_memory_role = iam.Role(
             self,
@@ -173,12 +197,13 @@ class AppStack(Stack):
         # ------------------------------------------------------------------
         # Runtime + Gateway + Targets (gated on agentCoreEnabled).
         # ------------------------------------------------------------------
-        # Pin images by digest (not tag). A new CodeBuild push changes the
-        # digest, which is a real CFN delta — Lambdas and the Runtime redeploy.
-        # The digest SSM param is written by buildspec.yml post_build.
-        image_tag = ssm.StringParameter.value_from_lookup(self, "/aihedge/image/tag")
-        image_digest = ssm.StringParameter.value_from_lookup(self, "/aihedge/image/digest")
-        osis_endpoint_param = observability_enabled and platform.osis_ingest_endpoint or ""
+        # Read image coordinates from SSM at deploy time (CFN tokens, not
+        # synth-time lookups). CodeBuild populates these in its post_build.
+        # Synth succeeds even before the first build; the Lambda container
+        # images just won't resolve until deploy time.
+        image_tag = ssm.StringParameter.value_for_string_parameter(self, "/aihedge/image/tag")
+        image_digest = ssm.StringParameter.value_for_string_parameter(self, "/aihedge/image/digest")
+        osis_endpoint_param = platform.osis_ingest_endpoint if observability_enabled and platform.osis_ingest_endpoint else ""
 
         runtime_env = {
             "AIHEDGE_IN_CLUSTER": "1",
@@ -231,7 +256,7 @@ class AppStack(Stack):
                 log_retention=log_retention,
             )
             self.memory_table.grant_read_write_data(self.bundle.target_functions["memory-log"])
-            platform.financial_datasets_secret.grant_read(self.bundle.target_functions["data-tools"])
+            # role-side policy already granted via lambda_data_role above; nothing extra needed
 
         # ------------------------------------------------------------------
         # Fargate cluster + task def — analyst-driver per ticker.
@@ -256,7 +281,12 @@ class AppStack(Stack):
                 resources=[f"arn:aws:bedrock-agentcore:{self.region}:{self.account}:runtime/*"],
             )
         )
-        platform.config_bucket.grant_read_write(task_role)
+        task_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject", "s3:PutObject", "s3:ListBucket", "s3:DeleteObject"],
+                resources=[platform.config_bucket.bucket_arn, f"{platform.config_bucket.bucket_arn}/*"],
+            )
+        )
         task_role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
@@ -325,7 +355,12 @@ class AppStack(Stack):
             permissions_boundary=platform.permission_boundary,
             managed_policies=[iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole")],
         )
-        platform.config_bucket.grant_read_write(glue_role)
+        glue_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject", "s3:PutObject", "s3:ListBucket", "s3:DeleteObject"],
+                resources=[platform.config_bucket.bucket_arn, f"{platform.config_bucket.bucket_arn}/*"],
+            )
+        )
         self.summary_topic.grant_publish(glue_role)
 
         get_config_fn = _lambda(
@@ -422,7 +457,7 @@ class AppStack(Stack):
                 level="ERROR",
             ),
             tracing_configuration=sfn.CfnStateMachine.TracingConfigurationProperty(enabled=True),
-            tags=[cdk.CfnTag(key="UsedBy", value="AIHedge")],
+            tags=[sfn.CfnStateMachine.TagsEntryProperty(key="UsedBy", value="AIHedge")],
         )
 
         # State Machine perms
@@ -474,6 +509,8 @@ class AppStack(Stack):
             api_name="aihedge-web",
             description="IAM-auth entry points for AI-HedgeFund runs",
         )
+        # HttpApi's CfnApi L1 doesn't inherit app-level tags; set explicitly.
+        cdk.Tags.of(http_api).add("UsedBy", "AIHedge")
         iam_authorizer = apigw_authz.HttpIamAuthorizer()
         http_api.add_routes(
             path="/runs",

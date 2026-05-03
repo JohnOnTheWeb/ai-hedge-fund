@@ -13,7 +13,6 @@ from aws_cdk.assertions import Template
 # Make the infra/ package importable when pytest runs from repo root.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from aspects.apply_default_tag import ApplyDefaultTag  # noqa: E402
 from aspects.require_tag import RequireTag  # noqa: E402
 from stacks.app_stack import AppStack  # noqa: E402
 from stacks.platform_stack import PlatformStack  # noqa: E402
@@ -45,7 +44,7 @@ def test_synth_first_pass():
     app_stack = AppStack(app, "AIHedge-App-Stack", env=env, platform=platform)
     app_stack.add_dependency(platform)
 
-    cdk.Aspects.of(app).add(ApplyDefaultTag(key="UsedBy", value="AIHedge"))
+    cdk.Tags.of(app).add("UsedBy", "AIHedge")
     cdk.Aspects.of(app).add(RequireTag(key="UsedBy", value="AIHedge"))
 
     # Will raise MissingRequiredTagError if any taggable resource slips through.

@@ -35,7 +35,7 @@ from aws_cdk import aws_sns_subscriptions as sns_subs
 from aws_cdk import aws_ssm as ssm
 from constructs import Construct
 
-from constructs.otel_pipeline import OtelPipeline
+from aihedge_constructs.otel_pipeline import OtelPipeline
 
 _POLICY_DOC = Path(__file__).resolve().parent.parent / "policies" / "required_tag_boundary.json"
 
@@ -358,6 +358,16 @@ class PlatformStack(Stack):
                     master_user_name="aihedge-admin",
                     master_user_password=self.opensearch_master_secret.secret_value_from_json("password"),
                 ),
+                # AwsSolutions-OS5: require SigV4 / FGAC; no anonymous access.
+                # Permits any signed request from this account; FGAC then enforces
+                # per-role/user authorization via the OpenSearch security plugin.
+                access_policies=[
+                    iam.PolicyStatement(
+                        actions=["es:ESHttp*"],
+                        principals=[iam.AccountRootPrincipal()],
+                        resources=["*"],
+                    )
+                ],
                 removal_policy=data_removal,
             )
 
@@ -377,7 +387,8 @@ class PlatformStack(Stack):
                 log_retention=log_retention,
             )
             self.osis_pipeline_arn = otel.pipeline.attr_pipeline_arn
-            self.osis_ingest_endpoint = otel.pipeline.attr_ingest_endpoint_urls
+            # attr_ingest_endpoint_urls is a list token; take the first entry.
+            self.osis_ingest_endpoint = cdk.Fn.select(0, otel.pipeline.attr_ingest_endpoint_urls)
 
         # ------------------------------------------------------------------
         # Config rule — continuous tag drift detection.
