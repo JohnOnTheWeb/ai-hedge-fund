@@ -33,14 +33,21 @@ MD_STORE_ENDPOINT = "https://jjjtiltcja.execute-api.us-east-1.amazonaws.com/prod
 MD_STORE_TOKEN_SECRET = "aihedge/md-store-token"
 CONFIG_BUCKET = "aihedge-config-590183796434-us-east-1"
 
-ERROR_PHRASES = [
-    "Error in analysis",
-    "Parsing error",
-    "Error in generating",
-    "defaulting to neutral",
+# Canned fallback strings that agent code returns when the framework (LLM
+# call, JSON parse, missing data check) fails. Matched as EXACT full reasoning
+# values — LLMs can use these words in natural-language reasoning and that's
+# fine; we only reject when the reasoning IS (entirely) one of these stubs.
+ERROR_STUBS = {
+    "Error in analysis, defaulting to neutral",
+    "Error in analysis; defaulting to neutral",
+    "Parsing error; defaulting to neutral",
+    "Parsing error - defaulting to neutral",
+    "Parsing error — defaulting to neutral",
+    "Parsing error – defaulting to neutral",
+    "Error in generating analysis; defaulting to neutral.",
+    "Error in generating analysis, defaulting to neutral.",
     "Insufficient data",
-    "Error in generating analysis",
-]
+}
 
 
 def _start(sfn, tickers: list[str], trade_date: str) -> str:
@@ -111,7 +118,8 @@ def _ticker_results(session: boto3.Session, run_id: str, tickers: list[str]) -> 
 
 
 def _find_agent_errors(per_ticker_result: dict) -> list[str]:
-    """Return list of "ticker.agent: <reason>" for any agent with an error phrase."""
+    """Return list of "ticker.agent: <stub>" for any agent whose reasoning is
+    an exact framework-fallback stub (vs genuine LLM-generated reasoning)."""
     errors: list[str] = []
     analyst_signals = per_ticker_result.get("analyst_signals", {})
     if not isinstance(analyst_signals, dict):
@@ -124,13 +132,13 @@ def _find_agent_errors(per_ticker_result: dict) -> list[str]:
                 continue
             reasoning = sig.get("reasoning")
             if isinstance(reasoning, str):
-                text = reasoning
+                text = reasoning.strip()
             else:
-                text = json.dumps(reasoning) if reasoning else ""
-            for phrase in ERROR_PHRASES:
-                if phrase.lower() in text.lower():
-                    errors.append(f"{ticker}.{agent_name}: {phrase} -> {text[:120]}")
-                    break
+                # Non-string reasoning (dict/structured) is analytical output,
+                # not an error stub. Skip.
+                continue
+            if text in ERROR_STUBS:
+                errors.append(f"{ticker}.{agent_name}: stub=\"{text}\"")
     return errors
 
 

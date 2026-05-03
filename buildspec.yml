@@ -66,15 +66,22 @@ phases:
 
       # --- Roll the AgentCore Runtime so it re-pulls the new image ---
       - |
-        RUNTIME_ID=$(aws bedrock-agentcore-control list-agent-runtimes \
-            --query "agentRuntimes[?agentRuntimeName=='aihedge_runtime'].agentRuntimeId | [0]" \
+        RUNTIME_INFO=$(aws bedrock-agentcore-control list-agent-runtimes \
+            --query "agentRuntimes[?agentRuntimeName=='aihedge_runtime'].[agentRuntimeId,roleArn] | [0]" \
             --output text 2>/dev/null || true)
+        RUNTIME_ID=$(echo "$RUNTIME_INFO" | awk '{print $1}')
+        RUNTIME_ROLE=$(echo "$RUNTIME_INFO" | awk '{print $2}')
+        if [ -z "$RUNTIME_ROLE" ] || [ "$RUNTIME_ROLE" = "None" ]; then
+          RUNTIME_ROLE=$(aws bedrock-agentcore-control get-agent-runtime \
+              --agent-runtime-id "$RUNTIME_ID" --query 'roleArn' --output text 2>/dev/null || true)
+        fi
         if [ -n "$RUNTIME_ID" ] && [ "$RUNTIME_ID" != "None" ]; then
-          echo "Updating AgentCore Runtime $RUNTIME_ID to pick up $SHORT_SHA"
+          echo "Updating AgentCore Runtime $RUNTIME_ID to pick up $SHORT_SHA (role=$RUNTIME_ROLE)"
           aws bedrock-agentcore-control update-agent-runtime \
               --agent-runtime-id "$RUNTIME_ID" \
               --agent-runtime-artifact "containerConfiguration={containerUri=$ECR_URI_APP:$SHORT_SHA}" \
-              --network-configuration '{"networkMode":"PUBLIC"}'
+              --network-configuration '{"networkMode":"PUBLIC"}' \
+              --role-arn "$RUNTIME_ROLE"
         else
           echo "No AgentCore Runtime yet; skipping Runtime update."
         fi
