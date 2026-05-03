@@ -206,18 +206,21 @@ def main() -> int:
     else:
         print("[6] OK  every ticker result has non-empty report_keys")
 
-    # Criterion 4
+    # Criterion 4: per-ticker files at AIHedge/<ticker>.md + AIHedge/summary.md
     md_token = _md_store_token(session)
     md_missing = []
     for ticker in tickers:
-        key = f"AIHedge/{trade_date}/{run_id}/{ticker}.md"
+        key = f"AIHedge/{ticker}.md"
         ok, msg = _md_store_read(md_token, key)
         if not ok:
             md_missing.append(f"{key}: {msg}")
+    ok_sum, msg_sum = _md_store_read(md_token, "AIHedge/summary.md")
+    if not ok_sum:
+        md_missing.append(f"AIHedge/summary.md: {msg_sum}")
     if md_missing:
         failures.append("[4] MD-Store files missing:\n    " + "\n    ".join(md_missing))
     else:
-        print(f"[4] OK  all {len(tickers)} MD-Store files present under AIHedge/{trade_date}/{run_id}/")
+        print(f"[4] OK  all {len(tickers)} per-ticker MD-Store files + summary.md present")
 
     # Criterion 5
     all_agent_errors: list[str] = []

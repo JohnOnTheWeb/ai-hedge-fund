@@ -230,7 +230,11 @@ def _write_reports(
             decision=decisions.get(ticker, {}),
             analyst_signals={k: v.get(ticker) for k, v in analyst_signals.items() if ticker in (v or {})},
         )
-        key = f"{prefix}/{trade_date}/{run_id}/{ticker}.md"
+        # One file per ticker, regenerated each run. No date folder, no run_id
+        # suffix — the latest run always overwrites the previous file at the
+        # same key. Callers get "what does AIHedge think about NVDA?" from
+        # a stable path.
+        key = f"{prefix}/{ticker}.md"
         payload = {
             "jsonrpc": "2.0",
             "id": str(uuid.uuid4()),

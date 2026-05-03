@@ -10,8 +10,82 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 
 import boto3
+
+
+def _write_summary_to_md_store(trade_date: str, run_id: str, results: dict, failed: list[str], status: str) -> None:
+    """Write the run-summary markdown to MD-Store at AIHedge/summary.md.
+
+    One file total, overwritten every run. Contains ticker + decision for
+    every ticker in the run, plus the overall status line. Best-effort:
+    failures are logged but do not fail the aggregate Lambda — the per-
+    ticker writes done by Runtime are the authoritative outputs.
+    """
+    import logging
+
+    log = logging.getLogger("aggregate.summary")
+    endpoint = os.environ.get("AIHEDGE_MD_STORE_URL")
+    prefix = os.environ.get("AIHEDGE_MD_STORE_PREFIX", "AIHedge")
+    secret_id = os.environ.get("AIHEDGE_MD_STORE_SECRET_ID", "aihedge/md-store-token")
+    if not endpoint:
+        log.warning("AIHEDGE_MD_STORE_URL not set; skipping summary write")
+        return
+    try:
+        sm = boto3.client("secretsmanager")
+        raw = sm.get_secret_value(SecretId=secret_id)["SecretString"]
+        try:
+            token = json.loads(raw).get("token") or raw
+        except (json.JSONDecodeError, TypeError):
+            token = raw
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not read MD-Store token: %s", exc)
+        return
+
+    lines = [
+        "# AI-HedgeFund — run summary",
+        f"- trade_date: {trade_date}",
+        f"- run_id: `{run_id}`",
+        f"- status: **{status}**",
+        "",
+        "| ticker | action | quantity | confidence |",
+        "| --- | --- | --- | --- |",
+    ]
+    for ticker in sorted(results.keys()):
+        r = results.get(ticker) or {}
+        if ticker in failed:
+            lines.append(f"| {ticker} | FAILED | — | — |")
+            continue
+        decision = (r.get("decisions") or {}).get(ticker) or {}
+        lines.append(
+            f"| {ticker} | {decision.get('action', '?')} | {decision.get('quantity', 0)} | {decision.get('confidence', '?')} |"
+        )
+    body = "\n".join(lines) + "\n"
+
+    key = f"{prefix}/summary.md"
+    payload = {
+        "jsonrpc": "2.0",
+        "id": str(uuid.uuid4()),
+        "method": "tools/call",
+        "params": {"name": "write_file", "arguments": {"key": key, "content": body}},
+    }
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "X-Agent-Id": "ai-hedge-fund-aggregate",
+        "MCP-Protocol-Version": "2025-06-18",
+    }
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp_body = json.loads(resp.read().decode("utf-8"))
+        if "error" in resp_body:
+            log.error("MD-Store summary write returned error: %s", resp_body["error"])
+    except Exception as exc:  # noqa: BLE001
+        log.error("MD-Store summary write failed (non-fatal): %s", exc)
 
 
 def handler(event, _context):
@@ -62,6 +136,10 @@ def handler(event, _context):
         Body=json.dumps(summary, default=str).encode("utf-8"),
         ContentType="application/json",
     )
+
+    # Write the consolidated decision summary to MD-Store at AIHedge/summary.md.
+    # Best-effort — never blocks the SFN on MD-Store outage.
+    _write_summary_to_md_store(trade_date, run_id, results, failed, status)
 
     sns = boto3.client("sns")
     subject = f"[AIHedge] {status} {trade_date} — ok={len(tickers)-len(failed)} failed={len(failed)}"

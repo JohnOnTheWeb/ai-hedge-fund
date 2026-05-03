@@ -473,7 +473,19 @@ class AppStack(Stack):
             {
                 "AIHEDGE_CONFIG_BUCKET": platform.config_bucket.bucket_name,
                 "AIHEDGE_SUMMARY_TOPIC_ARN": self.summary_topic.topic_arn,
+                # MD-Store write of AIHedge/summary.md. Matches the per-ticker
+                # write in runtime.py (same endpoint + secret).
+                "AIHEDGE_MD_STORE_URL": md_store_url,
+                "AIHEDGE_MD_STORE_PREFIX": md_store_prefix,
+                "AIHEDGE_MD_STORE_SECRET_ID": platform.md_store_secret.secret_name,
             },
+        )
+        # Aggregate needs to read the MD-Store bearer token from Secrets Manager.
+        glue_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
+                resources=[platform.md_store_secret.secret_arn],
+            )
         )
         error_fn = _lambda(
             "ErrorHandler",
