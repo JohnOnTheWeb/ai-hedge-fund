@@ -74,10 +74,23 @@ def call_llm(
                 progress.update_status(agent_name, None, f"Error - retry {attempt + 1}/{max_retries}")
 
             if attempt == max_retries - 1:
-                print(f"Error in LLM call after {max_retries} attempts: {e}")
+                import sys, traceback as _tb
+                err_msg = f"[LLM ERROR] {agent_name or 'unknown'} model={model_name} provider={model_provider}: {type(e).__name__}: {e}"
+                print(err_msg, flush=True)
+                print(err_msg, file=sys.stderr, flush=True)
+                _tb.print_exc(file=sys.stderr)
                 # Use default_factory if provided, otherwise create a basic default
                 if default_factory:
-                    return default_factory()
+                    result = default_factory()
+                    # Inject the real error into the reasoning field so it
+                    # surfaces in the aggregated result JSON (OTel runtime
+                    # logs silently drop stdout).
+                    if hasattr(result, "reasoning"):
+                        try:
+                            result.reasoning = err_msg[:400]
+                        except Exception:
+                            pass
+                    return result
                 return create_default_response(pydantic_model)
 
     # This should never be reached due to the retry logic above
