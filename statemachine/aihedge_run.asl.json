@@ -29,6 +29,7 @@
     },
     "MapTickers": {
       "Type": "Map",
+      "Comment": "TauricResearch raised from 3 to 15 once Fargate quota headroom was verified. Start conservative at 5; bump after first prod run.",
       "MaxConcurrency": 5,
       "ItemsPath": "$.tickers",
       "ItemSelector": {

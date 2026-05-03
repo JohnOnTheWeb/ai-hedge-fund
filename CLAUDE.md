@@ -114,3 +114,24 @@ Quantitative pipeline: `data → signals → features → validation → backtes
 - `isort` is configured with `force_alphabetical_sort_within_sections = true`.
 - Agents return partial state dicts that rely on the `AgentState` reducers — never return a whole new state object that drops keys from upstream analysts.
 - When adding an LLM provider, update `ModelProvider` in `src/llm/models.py`, add a factory branch in `get_model()`, register defaults in `src/llm/api_models.json`, and ensure `src/utils/api_key.py` can source the key.
+
+## AWS deployment (`infra/`, `deploy/`, `scripts/`, `Dockerfile.app`, `buildspec.yml`, `statemachine/`)
+
+Two-stack CDK-Python app:
+- `AIHedge-Platform-Stack` — VPC, ECR, CodePipeline/CodeBuild, OpenSearch, AMP, OSIS, Gateway shell, KMS, Secrets, Config rule. Long-lived.
+- `AIHedge-App-Stack` — AgentCore Runtime + Gateway Lambda targets, Fargate, Step Functions, APIGW HTTP API (IAM auth), EventBridge daily cron, DynamoDB memory log, SNS. Push-button destroy.
+
+Tag enforcement is 3-layered: CDK aspect (synth-time), IAM permission boundary (request-time), AWS Config `required-tags` rule (runtime drift). Mandatory tag: `UsedBy=AIHedge`.
+
+Non-obvious operational facts:
+
+- **CodeBuild clones from GitHub, not your local tree.** Source is `JohnOnTheWeb/ai-hedge-fund@main`. `git push` before triggering the pipeline — local edits are invisible otherwise.
+- **Two-phase deploy.** First `cdk deploy -c agentCoreEnabled=false` (creates ECR, CodeBuild, Gateway shell); trigger CodePipeline; then `cdk deploy -c agentCoreEnabled=true` (creates Runtime + Gateway targets which validate the image at create time).
+- **After every image push**, the buildspec's post_build calls `bedrock-agentcore-control update-agent-runtime` to force the Runtime to re-pull. Lambdas pin to image digest (via SSM `/aihedge/image/digest`) so CFN detects real deltas on redeploy.
+- **Bedrock auth is IAM task-role**, not bearer token. `AWS_BEARER_TOKEN_BEDROCK` is not used anywhere.
+- **Secrets must be seeded manually.** `scripts/seed_secrets.py` reads `FINANCIAL_DATASETS_API_KEY` + `MD_STORE_TOKEN` from your local environment and writes to Secrets Manager. The MD-Store token in particular has no AWS-managed copy — if you run `cdk destroy --all` it regenerates to garbage and MD-Store returns 401 until you re-seed from the external source.
+- **Retained-resource orphans block re-deploy.** `cdk destroy` leaves Secrets (by design) and may leave OpenSearch/AMP/OSIS/ECR (via `RETAIN` unless `-c platformDestroy=true`). `scripts/purge_orphans.sh` cleans up anything tagged `UsedBy=AIHedge`; run with `--execute` to actually delete.
+- **Gateway tool namespacing is `<target>___<tool>` (triple underscore).** `src/tools/mcp_client.py` handles the prefix automatically; Lambda handlers strip it on receive.
+- **Step Functions can SUCCEED while tickers failed.** `aggregate` Lambda sets `status` to `SUCCESS` / `PARTIAL_FAILURE` / `FAILURE` and lists `tickers_failed` in the summary JSON and SNS email.
+- **Map concurrency starts at 5** (`statemachine/aihedge_run.asl.json`). TauricResearch ran at 15 once Fargate quotas were confirmed; bump after first prod run.
+- **Local CLI is unaffected.** `poetry run python src/main.py --ticker AAPL` works unchanged — AWS hooks are gated on `AIHEDGE_IN_CLUSTER=1` or `AIHEDGE_GATEWAY_URL`.

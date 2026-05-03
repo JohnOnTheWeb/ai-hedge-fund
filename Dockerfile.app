@@ -45,6 +45,12 @@ RUN pip install \
 COPY src/ /app/src/
 COPY deploy/ /app/deploy/
 
+# Defensive: buildx has been observed stripping exec bits off COPYed binaries
+# in multi-stage builds, causing every Lambda invocation to fail with
+# Runtime.InvalidEntrypoint. This is cheap insurance for any future multi-stage
+# refactor of this Dockerfile.
+RUN chmod a+rx /usr/local/bin/python* 2>/dev/null || true
+
 # AgentCore Runtime expects port 8080; default CMD runs the FastAPI app.
 EXPOSE 8080
 
