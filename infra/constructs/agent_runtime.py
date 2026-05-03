@@ -35,6 +35,7 @@ class AgentRuntimeBundle(Construct):
         *,
         image_repo: ecr.IRepository,
         image_tag: str,
+        image_digest: str,
         runtime_role: iam.IRole,
         gateway_role: iam.IRole,
         lambda_targets: list[tuple[LambdaTargetSpec, iam.IRole]],
@@ -96,7 +97,7 @@ class AgentRuntimeBundle(Construct):
                 runtime=lambda_.Runtime.FROM_IMAGE,
                 code=lambda_.Code.from_ecr_image(
                     repository=image_repo,
-                    tag_or_digest=image_tag,
+                    tag_or_digest=image_digest,  # digest so new builds trigger CFN update
                     cmd=spec.handler_cmd,
                 ),
                 handler=lambda_.Handler.FROM_IMAGE,

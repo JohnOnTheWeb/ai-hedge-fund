@@ -26,7 +26,7 @@ def _past_context_for(ticker: str) -> dict:
     if not _memory_enabled() or os.environ.get("AIHEDGE_IN_CLUSTER") != "1":
         return {}
     try:
-        return _memory_call("get_past_context", {"ticker": ticker}) or {}
+        return _memory_call("memory-log", "get_past_context", {"ticker": ticker}) or {}
     except Exception:  # noqa: BLE001
         return {}
 
@@ -36,6 +36,7 @@ def _store_decision(ticker: str, trade_date: str, run_id: str, decision: dict, a
         return
     try:
         _memory_call(
+            "memory-log",
             "store_decision",
             {
                 "ticker": ticker,

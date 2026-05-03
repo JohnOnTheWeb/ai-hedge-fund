@@ -161,7 +161,11 @@ class AppStack(Stack):
         # ------------------------------------------------------------------
         # Runtime + Gateway + Targets (gated on agentCoreEnabled).
         # ------------------------------------------------------------------
+        # Pin images by digest (not tag). A new CodeBuild push changes the
+        # digest, which is a real CFN delta — Lambdas and the Runtime redeploy.
+        # The digest SSM param is written by buildspec.yml post_build.
         image_tag = ssm.StringParameter.value_from_lookup(self, "/aihedge/image/tag")
+        image_digest = ssm.StringParameter.value_from_lookup(self, "/aihedge/image/digest")
         osis_endpoint_param = observability_enabled and platform.osis_ingest_endpoint or ""
 
         runtime_env = {
@@ -201,7 +205,8 @@ class AppStack(Stack):
                 self,
                 "AgentCore",
                 image_repo=platform.image_repo,
-                image_tag=image_tag,
+                image_tag=image_tag,  # Runtime uses tag; post-build calls update-agent-runtime to force re-pull
+                image_digest=image_digest,
                 runtime_role=runtime_role,
                 gateway_role=gateway_role,
                 lambda_targets=[
@@ -261,7 +266,7 @@ class AppStack(Stack):
         )
         task_def.add_container(
             "driver",
-            image=ecs.ContainerImage.from_ecr_repository(platform.image_repo, image_tag),
+            image=ecs.ContainerImage.from_ecr_repository(platform.image_repo, image_digest),
             command=["python", "-m", "deploy.app.task_runner"],
             logging=ecs.LogDrivers.aws_logs(
                 stream_prefix="analyst-driver",
@@ -286,7 +291,7 @@ class AppStack(Stack):
                 runtime=lambda_.Runtime.FROM_IMAGE,
                 code=lambda_.Code.from_ecr_image(
                     repository=platform.image_repo,
-                    tag_or_digest=image_tag,
+                    tag_or_digest=image_digest,  # pin Lambdas by digest so new builds actually roll
                     cmd=[handler_path],
                 ),
                 handler=lambda_.Handler.FROM_IMAGE,

@@ -46,7 +46,8 @@ def _to_json_safe(obj):
 
 
 def handler(event, _context):
-    name = event.get("toolName") or event.get("name")
+    raw_name = event.get("toolName") or event.get("name") or ""
+    name = raw_name.split("___", 1)[-1] if "___" in raw_name else raw_name
     args = event.get("arguments") or event.get("input") or {}
     tbl = _table()
 
@@ -63,10 +64,11 @@ def handler(event, _context):
         # Cross-ticker lessons: a scan with limit is acceptable at 400-day TTL scale.
         cross = tbl.scan(Limit=cross_limit).get("Items", [])
         return {
+            "tool_name": raw_name,
             "result": {
                 "same_ticker": [_to_json_safe(i) for i in same],
                 "cross_ticker": [_to_json_safe(i) for i in cross],
-            }
+            },
         }
 
     if name == "store_decision":
@@ -88,7 +90,7 @@ def handler(event, _context):
             "ttl": ttl,
         }
         tbl.put_item(Item=item)
-        return {"result": {"stored": True, "key": item["trade_date_run"]}}
+        return {"tool_name": raw_name, "result": {"stored": True, "key": item["trade_date_run"]}}
 
     if name == "get_pending_entries":
         ticker = args["ticker"]
@@ -100,7 +102,7 @@ def handler(event, _context):
             Limit=20,
         ).get("Items", [])
         pending = [i for i in items if i.get("pending")]
-        return {"result": [_to_json_safe(i) for i in pending]}
+        return {"tool_name": raw_name, "result": [_to_json_safe(i) for i in pending]}
 
     if name == "update_realized_returns":
         tbl.update_item(
@@ -112,6 +114,6 @@ def handler(event, _context):
                 ":p": False,
             },
         )
-        return {"result": {"updated": True}}
+        return {"tool_name": raw_name, "result": {"updated": True}}
 
-    return {"error": f"unknown tool: {name}"}
+    return {"error": f"unknown tool: {raw_name}"}

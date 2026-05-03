@@ -40,6 +40,22 @@ phases:
       - aws ssm put-parameter --name "$IMAGE_SSM_TAG" --value "$SHORT_SHA" --type String --overwrite
       - aws ssm put-parameter --name "$IMAGE_SSM_DIGEST" --value "$DIGEST" --type String --overwrite
       - printf '{"imageUri":"%s","imageTag":"%s","imageDigest":"%s"}\n' "$ECR_URI" "$SHORT_SHA" "$DIGEST" > imageDetail.json
+      # Force the AgentCore Runtime to re-pull :latest (it pins by digest internally, so a new
+      # :latest tag without a control-plane nudge is invisible). Best-effort; skipped when the
+      # Runtime doesn't exist yet (first deploy, agentCoreEnabled=false).
+      - |
+        RUNTIME_ID=$(aws bedrock-agentcore-control list-agent-runtimes \
+            --query "agentRuntimes[?agentRuntimeName=='aihedge_runtime'].agentRuntimeId | [0]" \
+            --output text 2>/dev/null || true)
+        if [ -n "$RUNTIME_ID" ] && [ "$RUNTIME_ID" != "None" ]; then
+          echo "Updating AgentCore Runtime $RUNTIME_ID to pick up $SHORT_SHA"
+          aws bedrock-agentcore-control update-agent-runtime \
+              --agent-runtime-id "$RUNTIME_ID" \
+              --agent-runtime-artifact "containerConfiguration={containerUri=$ECR_URI:$SHORT_SHA}" \
+              --network-configuration '{"networkMode":"PUBLIC"}'
+        else
+          echo "No AgentCore Runtime yet; skipping update."
+        fi
 
 artifacts:
   files:

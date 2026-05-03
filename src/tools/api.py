@@ -71,7 +71,7 @@ def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None)
         return [Price(**price) for price in cached_data]
 
     if _gw_on():
-        data = _gw_call("get_prices", {"ticker": ticker, "start_date": start_date, "end_date": end_date}) or []
+        data = _gw_call("data-tools", "get_prices", {"ticker": ticker, "start_date": start_date, "end_date": end_date}) or []
         prices = [Price(**p) for p in data]
         if prices:
             _cache.set_prices(cache_key, [p.model_dump() for p in prices])
@@ -120,7 +120,7 @@ def get_financial_metrics(
         return [FinancialMetrics(**metric) for metric in cached_data]
 
     if _gw_on():
-        data = _gw_call("get_financial_metrics", {"ticker": ticker, "end_date": end_date, "period": period, "limit": limit}) or []
+        data = _gw_call("data-tools", "get_financial_metrics", {"ticker": ticker, "end_date": end_date, "period": period, "limit": limit}) or []
         metrics = [FinancialMetrics(**m) for m in data]
         if metrics:
             _cache.set_financial_metrics(cache_key, [m.model_dump() for m in metrics])
@@ -164,6 +164,7 @@ def search_line_items(
     """Fetch line items from API."""
     if _gw_on():
         data = _gw_call(
+            "data-tools",
             "search_line_items",
             {"ticker": ticker, "line_items": line_items, "end_date": end_date, "period": period, "limit": limit},
         ) or []
@@ -218,7 +219,7 @@ def get_insider_trades(
         return [InsiderTrade(**trade) for trade in cached_data]
 
     if _gw_on():
-        data = _gw_call("get_insider_trades", {"ticker": ticker, "end_date": end_date, "limit": limit}) or []
+        data = _gw_call("data-tools", "get_insider_trades", {"ticker": ticker, "end_date": end_date, "limit": limit}) or []
         trades = [InsiderTrade(**t) for t in data]
         if trades:
             _cache.set_insider_trades(cache_key, [t.model_dump() for t in trades])
@@ -291,7 +292,7 @@ def get_company_news(
         return [CompanyNews(**news) for news in cached_data]
 
     if _gw_on():
-        data = _gw_call("get_company_news", {"ticker": ticker, "end_date": end_date, "limit": limit}) or []
+        data = _gw_call("data-tools", "get_company_news", {"ticker": ticker, "end_date": end_date, "limit": limit}) or []
         news_list = [CompanyNews(**n) for n in data]
         if news_list:
             _cache.set_company_news(cache_key, [n.model_dump() for n in news_list])
@@ -355,7 +356,7 @@ def get_market_cap(
 ) -> float | None:
     """Fetch market cap from the API."""
     if _gw_on():
-        result = _gw_call("get_market_cap", {"ticker": ticker, "end_date": end_date})
+        result = _gw_call("data-tools", "get_market_cap", {"ticker": ticker, "end_date": end_date})
         if isinstance(result, dict):
             return result.get("market_cap")
         return result

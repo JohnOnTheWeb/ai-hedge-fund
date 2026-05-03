@@ -1,8 +1,12 @@
 """MCP `data-tools` target — Financial Datasets API.
 
-Reuses the existing helpers in `src/tools/api.py` so local CLI and in-AWS
-behaviour stay in lockstep. API key is resolved from Secrets Manager on
-cold start.
+Self-contained: does NOT import `src.tools.api`. That module is Gateway-routed
+when `AIHEDGE_GATEWAY_URL` is set, which would create a Lambda → Gateway →
+Lambda → Gateway infinite loop.
+
+As a defense-in-depth, we assert at cold start that `AIHEDGE_GATEWAY_URL` is
+unset in this environment so a future wiring mistake fails loudly instead of
+looping.
 """
 from __future__ import annotations
 
@@ -12,13 +16,12 @@ from functools import lru_cache
 
 import boto3
 
-from src.tools.api import (
-    get_company_news,
-    get_financial_metrics,
-    get_insider_trades,
-    get_market_cap,
-    get_prices,
-    search_line_items,
+from deploy.app.lambdas.data_tools import vendor
+
+_GATEWAY_URL_ENV = "AIHEDGE_GATEWAY_URL"
+assert not os.environ.get(_GATEWAY_URL_ENV), (
+    f"{_GATEWAY_URL_ENV} must NOT be set on the data-tools Lambda; that would "
+    "create a Lambda→Gateway→Lambda loop. Unset it in the task definition."
 )
 
 
@@ -33,24 +36,21 @@ def _api_key() -> str:
         return value
 
 
-def _as_list(obj):
-    if obj is None:
-        return []
-    if isinstance(obj, list):
-        return [x.model_dump() if hasattr(x, "model_dump") else x for x in obj]
-    return obj.model_dump() if hasattr(obj, "model_dump") else obj
-
-
 def handler(event, _context):
-    """Gateway dispatches one tool per invocation; event carries `name` + `arguments`."""
-    name = event.get("toolName") or event.get("name")
+    """Gateway dispatches one tool per invocation; event carries `name` + `arguments`.
+
+    Gateway namespaces the tool name as `data-tools___<tool>`; strip the prefix
+    before dispatching.
+    """
+    raw_name = event.get("toolName") or event.get("name") or ""
+    name = raw_name.split("___", 1)[-1] if "___" in raw_name else raw_name
     args = event.get("arguments") or event.get("input") or {}
     api_key = _api_key()
 
     if name == "get_prices":
-        data = get_prices(args["ticker"], args["start_date"], args["end_date"], api_key=api_key)
+        data = vendor.get_prices(args["ticker"], args["start_date"], args["end_date"], api_key)
     elif name == "get_financial_metrics":
-        data = get_financial_metrics(
+        data = vendor.get_financial_metrics(
             args["ticker"],
             args["end_date"],
             period=args.get("period", "ttm"),
@@ -58,7 +58,7 @@ def handler(event, _context):
             api_key=api_key,
         )
     elif name == "search_line_items":
-        data = search_line_items(
+        data = vendor.search_line_items(
             args["ticker"],
             args["line_items"],
             args["end_date"],
@@ -67,22 +67,22 @@ def handler(event, _context):
             api_key=api_key,
         )
     elif name == "get_market_cap":
-        data = get_market_cap(args["ticker"], args["end_date"], api_key=api_key)
+        data = vendor.get_market_cap(args["ticker"], args["end_date"], api_key)
     elif name == "get_company_news":
-        data = get_company_news(
+        data = vendor.get_company_news(
             args["ticker"],
             args["end_date"],
             limit=int(args.get("limit", 50)),
             api_key=api_key,
         )
     elif name == "get_insider_trades":
-        data = get_insider_trades(
+        data = vendor.get_insider_trades(
             args["ticker"],
             args["end_date"],
             limit=int(args.get("limit", 50)),
             api_key=api_key,
         )
     else:
-        return {"error": f"unknown tool: {name}"}
+        return {"error": f"unknown tool: {raw_name}"}
 
-    return {"result": _as_list(data)}
+    return {"tool_name": raw_name, "result": data}

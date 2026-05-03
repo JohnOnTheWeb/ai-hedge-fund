@@ -239,6 +239,18 @@ class PlatformStack(Stack):
                 ],
             )
         )
+        # Needed for the post_build step that rolls the AgentCore Runtime
+        # after every new image push (see buildspec.yml).
+        self.codebuild_project.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock-agentcore-control:ListAgentRuntimes",
+                    "bedrock-agentcore-control:UpdateAgentRuntime",
+                    "bedrock-agentcore-control:GetAgentRuntime",
+                ],
+                resources=["*"],
+            )
+        )
 
         source_artifact = codepipeline.Artifact("Source")
         build_artifact = codepipeline.Artifact("Build")
