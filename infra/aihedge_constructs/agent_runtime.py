@@ -50,6 +50,7 @@ class AgentRuntimeBundle(Construct):
         lambda_targets: list[tuple[LambdaTargetSpec, iam.IRole]],
         runtime_env: dict[str, str],
         log_retention: logs.RetentionDays,
+        tool_cache_table_name: str = "",
     ) -> None:
         super().__init__(scope, id_)
 
@@ -142,6 +143,7 @@ class AgentRuntimeBundle(Construct):
                 environment={
                     "AIHEDGE_IN_CLUSTER": "1",
                     "POWERTOOLS_SERVICE_NAME": spec.function_name,
+                    "AIHEDGE_TOOL_CACHE_TABLE": tool_cache_table_name,
                 },
             )
             self.target_functions[spec.target_name] = fn

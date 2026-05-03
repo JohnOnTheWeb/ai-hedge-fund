@@ -21,6 +21,7 @@ from functools import lru_cache
 import boto3
 
 from deploy.app.lambdas.data_tools import vendor
+from deploy.app.lambdas._common.cache import cached_call
 
 # yfinance fallback is imported lazily on first use (import is ~1s cold).
 _yf_vendor = None
@@ -109,44 +110,83 @@ def handler(event, context):
     tool_name, args = _resolve_tool_name_and_args(event or {}, context)
     api_key = _api_key()
 
+    # Cache key args: drop api_key / secrets; sort line_items so a different
+    # caller order still hits the same cache entry.
+    def _line_items_sorted(li):
+        return sorted(li) if isinstance(li, list) else li
+
     if tool_name == "get_prices":
-        data = _route(
-            lambda: vendor.get_prices(args["ticker"], args["start_date"], args["end_date"], api_key),
-            lambda: _yfinance().get_prices(args["ticker"], args["start_date"], args["end_date"]),
-            tool=tool_name,
+        ck_args = {"ticker": args["ticker"], "start_date": args["start_date"], "end_date": args["end_date"]}
+        data = cached_call(
+            tool_name,
+            ck_args,
+            lambda: _route(
+                lambda: vendor.get_prices(args["ticker"], args["start_date"], args["end_date"], api_key),
+                lambda: _yfinance().get_prices(args["ticker"], args["start_date"], args["end_date"]),
+                tool=tool_name,
+            ),
         )
     elif tool_name == "get_financial_metrics":
         period = args.get("period", "ttm")
         limit = int(args.get("limit", 10))
-        data = _route(
-            lambda: vendor.get_financial_metrics(args["ticker"], args["end_date"], period=period, limit=limit, api_key=api_key),
-            lambda: _yfinance().get_financial_metrics(args["ticker"], args["end_date"], period=period, limit=limit),
-            tool=tool_name,
+        ck_args = {"ticker": args["ticker"], "end_date": args["end_date"], "period": period, "limit": limit}
+        data = cached_call(
+            tool_name,
+            ck_args,
+            lambda: _route(
+                lambda: vendor.get_financial_metrics(args["ticker"], args["end_date"], period=period, limit=limit, api_key=api_key),
+                lambda: _yfinance().get_financial_metrics(args["ticker"], args["end_date"], period=period, limit=limit),
+                tool=tool_name,
+            ),
         )
     elif tool_name == "search_line_items":
         period = args.get("period", "ttm")
         limit = int(args.get("limit", 10))
-        data = _route(
-            lambda: vendor.search_line_items(args["ticker"], args["line_items"], args["end_date"], period=period, limit=limit, api_key=api_key),
-            lambda: _yfinance().search_line_items(args["ticker"], args["line_items"], args["end_date"], period=period, limit=limit),
-            tool=tool_name,
+        ck_args = {
+            "ticker": args["ticker"],
+            "end_date": args["end_date"],
+            "period": period,
+            "limit": limit,
+            "line_items": _line_items_sorted(args.get("line_items", [])),
+        }
+        data = cached_call(
+            tool_name,
+            ck_args,
+            lambda: _route(
+                lambda: vendor.search_line_items(args["ticker"], args["line_items"], args["end_date"], period=period, limit=limit, api_key=api_key),
+                lambda: _yfinance().search_line_items(args["ticker"], args["line_items"], args["end_date"], period=period, limit=limit),
+                tool=tool_name,
+            ),
         )
     elif tool_name == "get_market_cap":
-        primary_val = vendor.get_market_cap(args["ticker"], args["end_date"], api_key)
-        data = primary_val if primary_val is not None else _yfinance().get_market_cap(args["ticker"], args["end_date"])
+        ck_args = {"ticker": args["ticker"], "end_date": args["end_date"]}
+        def _produce_mc():
+            primary_val = vendor.get_market_cap(args["ticker"], args["end_date"], api_key)
+            return primary_val if primary_val is not None else _yfinance().get_market_cap(args["ticker"], args["end_date"])
+        data = cached_call(tool_name, ck_args, _produce_mc)
     elif tool_name == "get_company_news":
         limit = int(args.get("limit", 50))
-        data = _route(
-            lambda: vendor.get_company_news(args["ticker"], args["end_date"], limit=limit, api_key=api_key),
-            lambda: _yfinance().get_company_news(args["ticker"], args["end_date"], limit=limit),
-            tool=tool_name,
+        ck_args = {"ticker": args["ticker"], "end_date": args["end_date"], "limit": limit}
+        data = cached_call(
+            tool_name,
+            ck_args,
+            lambda: _route(
+                lambda: vendor.get_company_news(args["ticker"], args["end_date"], limit=limit, api_key=api_key),
+                lambda: _yfinance().get_company_news(args["ticker"], args["end_date"], limit=limit),
+                tool=tool_name,
+            ),
         )
     elif tool_name == "get_insider_trades":
         limit = int(args.get("limit", 50))
-        data = _route(
-            lambda: vendor.get_insider_trades(args["ticker"], args["end_date"], limit=limit, api_key=api_key),
-            lambda: _yfinance().get_insider_trades(args["ticker"], args["end_date"], limit=limit),
-            tool=tool_name,
+        ck_args = {"ticker": args["ticker"], "end_date": args["end_date"], "limit": limit}
+        data = cached_call(
+            tool_name,
+            ck_args,
+            lambda: _route(
+                lambda: vendor.get_insider_trades(args["ticker"], args["end_date"], limit=limit, api_key=api_key),
+                lambda: _yfinance().get_insider_trades(args["ticker"], args["end_date"], limit=limit),
+                tool=tool_name,
+            ),
         )
     else:
         return {"error": f"unknown tool: {tool_name}"}

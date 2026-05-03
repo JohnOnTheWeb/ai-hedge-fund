@@ -18,6 +18,7 @@ import aws_cdk as cdk
 from aws_cdk import CfnOutput, Duration, RemovalPolicy, Stack
 from aws_cdk import aws_aps as aps
 from aws_cdk import aws_codebuild as codebuild
+from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_ecr as ecr
 from aws_cdk import aws_iam as iam
@@ -177,6 +178,22 @@ class PlatformStack(Stack):
             description="MD-Store bearer token for AIHedge/ reports",
             encryption_key=self.cmk,
             removal_policy=RemovalPolicy.RETAIN,
+        )
+
+        # ------------------------------------------------------------------
+        # Tool-result cache — shared across target Lambdas. DDB native TTL
+        # drops rows automatically; TTL values vary per tool (see
+        # deploy/app/lambdas/_common/cache.py). Pay-per-request so idle
+        # cost is zero.
+        # ------------------------------------------------------------------
+        self.tool_cache_table = dynamodb.Table(
+            self,
+            "ToolCacheTable",
+            table_name="aihedge-tool-cache",
+            partition_key=dynamodb.Attribute(name="cache_key", type=dynamodb.AttributeType.STRING),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            time_to_live_attribute="ttl",
+            removal_policy=RemovalPolicy.DESTROY,
         )
 
         # ------------------------------------------------------------------

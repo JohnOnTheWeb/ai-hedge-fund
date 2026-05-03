@@ -117,6 +117,20 @@ def _run_graph(payload: dict[str, Any], current_node: dict[str, str]) -> dict[st
 
     portfolio = payload.get("portfolio") or _default_portfolio(tickers)
 
+    # Prefetch: run the high-frequency tool bundle in parallel for every
+    # ticker before the LangGraph agents start. Results warm the in-process
+    # _cache in src/tools/api.py, so all 20 agents get cache hits for free.
+    # Errors are swallowed — agents fall through to live Gateway calls on
+    # miss (correct behavior, just slower).
+    try:
+        from src.graph.prefetch import fetch_bundle
+        for ticker in tickers:
+            bundle = fetch_bundle(ticker, trade_date)
+            non_null = sum(1 for v in bundle.values() if v not in (None, [], {}))
+            print(f"[prefetch] {ticker}: {non_null}/{len(bundle)} items warmed", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[prefetch] skipped on error (non-fatal): {type(exc).__name__}: {exc}", flush=True)
+
     # Hook: LangGraph lets us observe state transitions via `stream(..., stream_mode='updates')`.
     # We update `current_node` so heartbeats reflect progress.
     final_state: dict[str, Any] | None = None

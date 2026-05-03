@@ -163,11 +163,22 @@ def search_line_items(
 ) -> list[LineItem]:
     """Fetch line items from API."""
     if _gw_on():
+        # In-process cache check: if a prior call (typically prefetch) asked
+        # for a superset of these line items with the same end_date/period,
+        # serve the subset from memory.
+        cache_key = f"{ticker}_{period}_{end_date}_{limit}"
+        cached = _cache.get_line_items(cache_key)
+        if cached and all(name in (cached[0].keys() if cached else ()) for name in line_items):
+            # Return matching subset — caller projects with getattr
+            return [LineItem(**li) for li in cached]
+
         data = _gw_call(
             "data-tools",
             "search_line_items",
             {"ticker": ticker, "line_items": line_items, "end_date": end_date, "period": period, "limit": limit},
         ) or []
+        if data:
+            _cache.set_line_items(cache_key, data)
         return [LineItem(**li) for li in data]
 
     # If not in cache or insufficient data, fetch from API

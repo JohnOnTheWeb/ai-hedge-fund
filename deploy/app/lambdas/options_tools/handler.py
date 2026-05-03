@@ -17,6 +17,8 @@ import os
 from datetime import datetime
 from typing import Any
 
+from deploy.app.lambdas._common.cache import cached_call
+
 _META_KEYS = frozenset({"toolName", "name", "arguments", "input", "tool_name"})
 
 _GATEWAY_URL_ENV = "AIHEDGE_GATEWAY_URL"
@@ -158,16 +160,17 @@ def handler(event, context):
     tool_name, args = _resolve_tool_name_and_args(event or {}, context)
 
     if tool_name == "get_historical_vol":
-        windows = args.get("windows") or [30, 60, 90]
-        data = _historical_vol(args["ticker"], [int(w) for w in windows])
+        windows = sorted([int(w) for w in (args.get("windows") or [30, 60, 90])])
+        ck_args = {"ticker": args["ticker"], "windows": windows}
+        data = cached_call(tool_name, ck_args, lambda: _historical_vol(args["ticker"], windows))
     elif tool_name == "get_earnings_context":
-        data = _earnings_context(args["ticker"])
+        ck_args = {"ticker": args["ticker"]}
+        data = cached_call(tool_name, ck_args, lambda: _earnings_context(args["ticker"]))
     elif tool_name == "get_options_chain":
-        data = _options_chain(
-            args["ticker"],
-            dte_target=int(args.get("dte_target", 30)),
-            strikes_width=int(args.get("strikes_width", 10)),
-        )
+        dte = int(args.get("dte_target", 30))
+        width = int(args.get("strikes_width", 10))
+        ck_args = {"ticker": args["ticker"], "dte_target": dte, "strikes_width": width}
+        data = cached_call(tool_name, ck_args, lambda: _options_chain(args["ticker"], dte, width))
     else:
         return {"error": f"unknown tool: {tool_name}"}
 

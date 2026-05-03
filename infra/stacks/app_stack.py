@@ -235,6 +235,15 @@ class AppStack(Stack):
                 resources=[platform.cmk.key_arn],
             )
         )
+        # Tool-result cache (shared by data-tools + options-tools Lambdas).
+        platform.tool_cache_table.grant_read_write_data(lambda_data_role)
+        lambda_data_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["cloudwatch:PutMetricData"],
+                resources=["*"],
+                conditions={"StringEquals": {"cloudwatch:namespace": "AIHedge/ToolCache"}},
+            )
+        )
 
         lambda_memory_role = iam.Role(
             self,
@@ -323,6 +332,7 @@ class AppStack(Stack):
                 ],
                 runtime_env=runtime_env,
                 log_retention=log_retention,
+                tool_cache_table_name=platform.tool_cache_table.table_name,
             )
             self.memory_table.grant_read_write_data(self.bundle.target_functions["memory-log"])
             # role-side policy already granted via lambda_data_role above; nothing extra needed

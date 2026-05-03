@@ -71,7 +71,7 @@ class LineItem(BaseModel):
     ticker: str
     report_period: str
     period: str
-    currency: str
+    currency: str | None = None
 
     # Allow additional fields dynamically
     model_config = {"extra": "allow"}
