@@ -152,7 +152,14 @@ def _run_graph(payload: dict[str, Any], current_node: dict[str, str]) -> dict[st
     decisions = parse_hedge_fund_response(last_message_content) or {}
     analyst_signals = last_state.get("data", {}).get("analyst_signals", {})
 
-    report_keys = _write_reports(run_id=run_id, trade_date=trade_date, decisions=decisions, analyst_signals=analyst_signals, tickers=tickers)
+    # MD-Store report writes are best-effort: per-ticker result JSONs in S3
+    # are the authoritative run output (what aggregate reads). Don't fail
+    # the run if the external MD-Store is unreachable.
+    try:
+        report_keys = _write_reports(run_id=run_id, trade_date=trade_date, decisions=decisions, analyst_signals=analyst_signals, tickers=tickers)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[WARN] MD-Store report write failed (non-fatal): {exc}")
+        report_keys = {}
 
     return {
         "run_id": run_id,
