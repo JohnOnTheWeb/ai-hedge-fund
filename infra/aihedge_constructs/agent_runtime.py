@@ -136,7 +136,7 @@ class AgentRuntimeBundle(Construct):
                 handler=lambda_.Handler.FROM_IMAGE,
                 architecture=lambda_.Architecture.ARM_64,
                 memory_size=1024,
-                timeout=Duration.seconds(60),
+                timeout=Duration.seconds(180),
                 role=role,
                 log_retention=log_retention,
                 environment={

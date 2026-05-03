@@ -87,6 +87,13 @@ def _md_store_read(token: str, key: str) -> tuple[bool, str]:
     body = r.json()
     if "error" in body:
         return False, str(body["error"])
+    # MD-Store returns 200 with content=[{"text":"null"}] when the key is
+    # missing. Treat null/empty content as "not found".
+    result = body.get("result") or {}
+    content = result.get("content") or []
+    text = content[0].get("text") if content and isinstance(content[0], dict) else None
+    if not text or text == "null":
+        return False, "file not found (read_file returned null)"
     return True, ""
 
 

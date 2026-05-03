@@ -56,7 +56,9 @@ def call_tool(target: str, tool: str, arguments: dict[str, Any]) -> Any:
 
     import requests
 
-    resp = requests.post(endpoint, headers=headers, data=signed_body, timeout=60)
+    # Long timeout: Gateway -> Lambda -> FinancialDatasets can be slow on
+    # cold-start + complex metrics queries. 60s was hitting ReadTimeouts.
+    resp = requests.post(endpoint, headers=headers, data=signed_body, timeout=180)
     resp.raise_for_status()
     parsed = resp.json()
     return _unwrap(parsed)
