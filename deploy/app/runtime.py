@@ -17,7 +17,12 @@ import os
 import threading
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
+
+
+def _default_start_date(trade_date: str) -> str:
+    """trade_date - 90 days, ISO. Used when the caller omits start_date."""
+    return (datetime.fromisoformat(trade_date) - timedelta(days=90)).strftime("%Y-%m-%d")
 from typing import Any, Iterator
 
 import boto3
@@ -121,7 +126,7 @@ def _run_graph(payload: dict[str, Any], current_node: dict[str, str]) -> dict[st
             "data": {
                 "tickers": tickers,
                 "portfolio": portfolio,
-                "start_date": payload.get("start_date"),
+                "start_date": payload.get("start_date") or _default_start_date(trade_date),
                 "end_date": trade_date,
                 "analyst_signals": {},
             },

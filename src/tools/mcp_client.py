@@ -75,6 +75,12 @@ def _unwrap(parsed: dict[str, Any]) -> Any:
     try:
         outer_result = parsed["result"]
         content = outer_result.get("content") if isinstance(outer_result, dict) else None
+        # MCP's isError=True packs the error message in content[].text as a
+        # raw string (not JSON). Surface it directly.
+        if isinstance(outer_result, dict) and outer_result.get("isError") and content:
+            first = content[0] if isinstance(content, list) and content else {}
+            msg = first.get("text") if isinstance(first, dict) else str(first)
+            raise RuntimeError(f"Gateway tool error: {msg}")
         if not content:
             # Some MCP dialects return {"result": ...} with no content wrapper.
             if isinstance(outer_result, dict) and "result" in outer_result:
