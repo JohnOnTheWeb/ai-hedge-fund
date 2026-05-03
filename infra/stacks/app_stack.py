@@ -72,14 +72,26 @@ class AppStack(Stack):
         models = self.node.try_get_context("aihedge:models") or {}
         assignments = self.node.try_get_context("aihedge:modelAssignments") or {}
 
-        # Build the 3 inference-profile ARN patterns Bedrock Converse uses.
-        def _inference_profile_arn(model_id: str) -> str:
-            return f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.{model_id}"
+        # Model IDs in cdk.json are cross-region inference-profile IDs
+        # (us.anthropic.claude-*). Bedrock Converse resolves these against
+        # foundation-model ARNs in us-east-1 / us-east-2 / us-west-2, so the
+        # invocation role needs InvokeModel on both the profile and the
+        # underlying foundation models in every US region.
+        def _profile_arn(profile_id: str) -> str:
+            return f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/{profile_id}"
 
-        allowed_bedrock_model_arns = [
-            f"arn:aws:bedrock:{self.region}::foundation-model/{m}"
-            for m in models.values()
-        ] + [_inference_profile_arn(m) for m in models.values()]
+        def _foundation_arn(profile_id: str) -> list[str]:
+            # strip "us." prefix to get the bare foundation-model id
+            base = profile_id.split(".", 1)[1] if profile_id.startswith("us.") else profile_id
+            return [
+                f"arn:aws:bedrock:us-east-1::foundation-model/{base}",
+                f"arn:aws:bedrock:us-east-2::foundation-model/{base}",
+                f"arn:aws:bedrock:us-west-2::foundation-model/{base}",
+            ]
+
+        allowed_bedrock_model_arns = [_profile_arn(m) for m in models.values()]
+        for m in models.values():
+            allowed_bedrock_model_arns.extend(_foundation_arn(m))
 
         # ------------------------------------------------------------------
         # DynamoDB memory log — Portfolio Manager past-context.

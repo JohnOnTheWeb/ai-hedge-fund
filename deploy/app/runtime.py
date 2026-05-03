@@ -152,14 +152,10 @@ def _run_graph(payload: dict[str, Any], current_node: dict[str, str]) -> dict[st
     decisions = parse_hedge_fund_response(last_message_content) or {}
     analyst_signals = last_state.get("data", {}).get("analyst_signals", {})
 
-    # MD-Store report writes are best-effort: per-ticker result JSONs in S3
-    # are the authoritative run output (what aggregate reads). Don't fail
-    # the run if the external MD-Store is unreachable.
-    try:
-        report_keys = _write_reports(run_id=run_id, trade_date=trade_date, decisions=decisions, analyst_signals=analyst_signals, tickers=tickers)
-    except Exception as exc:  # noqa: BLE001
-        print(f"[WARN] MD-Store report write failed (non-fatal): {exc}")
-        report_keys = {}
+    # MD-Store report writes are load-bearing for downstream audit / email
+    # workflows — fail the run if they don't land. The per-ticker JSON in
+    # S3 is additional, not a substitute.
+    report_keys = _write_reports(run_id=run_id, trade_date=trade_date, decisions=decisions, analyst_signals=analyst_signals, tickers=tickers)
 
     return {
         "run_id": run_id,
@@ -191,16 +187,25 @@ def _write_reports(
     analyst_signals: dict[str, Any],
     tickers: list[str],
 ) -> dict[str, str]:
-    """Write a markdown report per ticker to the MD-Store under AIHedge/..."""
-    prefix = os.environ.get("AIHEDGE_MD_STORE_PREFIX", "AIHedge")
-    md_store_token = _get_md_store_token()
+    """Write one markdown report per ticker to the MD-Store MCP server.
 
-    # MD-Store write uses the official MD-Store HTTP API (bearer token).
-    # We call it via requests with SigV4 NOT required (external service).
+    MD-Store speaks JSON-RPC 2.0 at a single endpoint; tool = `write_file`,
+    args = {key, content}. Matches the contract in
+    StockResearch-PublishToMdStoreFn / handler.py::_write_one_file.
+    """
+    import uuid
     import requests  # local import to keep cold start lean
 
-    base = os.environ.get("AIHEDGE_MD_STORE_URL", "https://mdstore.internal/files")
-    headers = {"Authorization": f"Bearer {md_store_token}", "X-Agent-Id": "ai-hedge-fund"}
+    prefix = os.environ.get("AIHEDGE_MD_STORE_PREFIX", "AIHedge")
+    endpoint = os.environ["AIHEDGE_MD_STORE_URL"]
+    md_store_token = _get_md_store_token()
+
+    headers = {
+        "Authorization": f"Bearer {md_store_token}",
+        "Content-Type": "application/json",
+        "X-Agent-Id": "ai-hedge-fund",
+        "MCP-Protocol-Version": "2025-06-18",
+    }
 
     report_keys: dict[str, str] = {}
     for ticker in tickers:
@@ -212,8 +217,20 @@ def _write_reports(
             analyst_signals={k: v.get(ticker) for k, v in analyst_signals.items() if ticker in (v or {})},
         )
         key = f"{prefix}/{trade_date}/{run_id}/{ticker}.md"
-        resp = requests.put(f"{base}/{key}", headers=headers, data=body.encode("utf-8"), timeout=15)
+        payload = {
+            "jsonrpc": "2.0",
+            "id": str(uuid.uuid4()),
+            "method": "tools/call",
+            "params": {
+                "name": "write_file",
+                "arguments": {"key": key, "content": body},
+            },
+        }
+        resp = requests.post(endpoint, headers=headers, json=payload, timeout=30)
         resp.raise_for_status()
+        rpc = resp.json()
+        if "error" in rpc:
+            raise RuntimeError(f"MD-Store MCP error for key={key}: {rpc['error']}")
         report_keys[ticker] = key
     return report_keys
 

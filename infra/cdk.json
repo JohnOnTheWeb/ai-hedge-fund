@@ -25,12 +25,12 @@
     "aihedge:repoBranch": "main",
     "aihedge:emailTo": "jotw@amazon.com",
     "aihedge:mdStorePrefix": "AIHedge",
-    "aihedge:mdStoreUrl": "https://mdstore.internal/files",
+    "aihedge:mdStoreUrl": "https://jjjtiltcja.execute-api.us-east-1.amazonaws.com/prod/mcp/v2",
     "aihedge:logRetentionDays": 7,
     "aihedge:models": {
-      "deep": "anthropic.claude-opus-4-7-20251015-v1:0",
-      "persona": "anthropic.claude-sonnet-4-5-20250929-v1:0",
-      "analytical": "anthropic.claude-haiku-4-5-20251001"
+      "deep": "us.anthropic.claude-opus-4-7",
+      "persona": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "analytical": "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     },
     "aihedge:modelAssignments": {
       "portfolio_manager": "deep",

@@ -1,17 +1,17 @@
 [
   {
     "display_name": "Bedrock Claude Opus 4.7",
-    "model_name": "anthropic.claude-opus-4-7-20251015-v1:0",
+    "model_name": "us.anthropic.claude-opus-4-7",
     "provider": "Bedrock"
   },
   {
     "display_name": "Bedrock Claude Sonnet 4.5",
-    "model_name": "anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "model_name": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
     "provider": "Bedrock"
   },
   {
     "display_name": "Bedrock Claude Haiku 4.5",
-    "model_name": "anthropic.claude-haiku-4-5-20251001",
+    "model_name": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     "provider": "Bedrock"
   },
   {
