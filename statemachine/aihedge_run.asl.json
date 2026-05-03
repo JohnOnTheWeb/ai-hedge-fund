@@ -1,0 +1,129 @@
+{
+  "Comment": "AI-HedgeFund run: get config -> Map(tickers, maxConc=5) -> Fargate driver -> aggregate -> SNS.",
+  "StartAt": "GetConfig",
+  "States": {
+    "GetConfig": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "OutputPath": "$.Payload",
+      "Parameters": {
+        "FunctionName": "${GetConfigArn}",
+        "Payload.$": "$"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "ReportError",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "MapTickers"
+    },
+    "MapTickers": {
+      "Type": "Map",
+      "MaxConcurrency": 5,
+      "ItemsPath": "$.tickers",
+      "ItemSelector": {
+        "ticker.$": "$$.Map.Item.Value",
+        "run_id.$": "$.run_id",
+        "trade_date.$": "$.trade_date",
+        "config_bucket.$": "$.config_bucket"
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "RunAnalystDriver",
+        "States": {
+          "RunAnalystDriver": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::ecs:runTask.sync",
+            "Parameters": {
+              "LaunchType": "FARGATE",
+              "Cluster": "${ClusterArn}",
+              "TaskDefinition": "${TaskDefArn}",
+              "NetworkConfiguration": {
+                "AwsvpcConfiguration": {
+                  "Subnets.$": "States.StringSplit('${SubnetList}', ',')",
+                  "AssignPublicIp": "DISABLED"
+                }
+              },
+              "Overrides": {
+                "ContainerOverrides": [
+                  {
+                    "Name": "${ContainerName}",
+                    "Environment": [
+                      {"Name": "AIHEDGE_TICKER", "Value.$": "$.ticker"},
+                      {"Name": "AIHEDGE_TRADE_DATE", "Value.$": "$.trade_date"},
+                      {"Name": "AIHEDGE_RUN_ID", "Value.$": "$.run_id"},
+                      {"Name": "AIHEDGE_CONFIG_BUCKET", "Value.$": "$.config_bucket"},
+                      {"Name": "AIHEDGE_RUNTIME_ARN", "Value": "${RuntimeArn}"}
+                    ]
+                  }
+                ]
+              }
+            },
+            "Retry": [
+              {
+                "ErrorEquals": ["States.TaskFailed"],
+                "IntervalSeconds": 30,
+                "MaxAttempts": 1,
+                "BackoffRate": 1.0
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "Next": "TickerFailed",
+                "ResultPath": "$.error"
+              }
+            ],
+            "End": true
+          },
+          "TickerFailed": {
+            "Type": "Pass",
+            "Result": {"status": "failed"},
+            "ResultPath": "$.result",
+            "End": true
+          }
+        }
+      },
+      "ResultPath": "$.map_results",
+      "Next": "Aggregate"
+    },
+    "Aggregate": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "OutputPath": "$.Payload",
+      "Parameters": {
+        "FunctionName": "${AggregateArn}",
+        "Payload.$": "$"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2
+        }
+      ],
+      "End": true
+    },
+    "ReportError": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ErrorHandlerArn}",
+        "Payload.$": "$"
+      },
+      "End": true
+    }
+  }
+}

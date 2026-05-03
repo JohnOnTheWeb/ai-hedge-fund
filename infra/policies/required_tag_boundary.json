@@ -1,0 +1,72 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyCreateWithoutUsedByTag",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:RunInstances",
+        "ec2:CreateVolume",
+        "ec2:CreateSecurityGroup",
+        "ec2:CreateVpcEndpoint",
+        "ecs:RunTask",
+        "ecs:CreateCluster",
+        "ecs:CreateService",
+        "ecs:RegisterTaskDefinition",
+        "lambda:CreateFunction",
+        "logs:CreateLogGroup",
+        "s3:CreateBucket",
+        "es:CreateDomain",
+        "osis:CreatePipeline",
+        "aps:CreateWorkspace",
+        "dynamodb:CreateTable",
+        "sns:CreateTopic",
+        "sqs:CreateQueue",
+        "states:CreateStateMachine",
+        "events:PutRule",
+        "scheduler:CreateSchedule",
+        "apigateway:POST",
+        "secretsmanager:CreateSecret",
+        "ecr:CreateRepository",
+        "codebuild:CreateProject",
+        "codepipeline:CreatePipeline",
+        "kms:CreateKey",
+        "bedrock-agentcore:CreateGateway",
+        "bedrock-agentcore:CreateAgentRuntime"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEqualsIfExists": {
+          "aws:RequestTag/UsedBy": "AIHedge"
+        }
+      }
+    },
+    {
+      "Sid": "DenyRemovingUsedByTag",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:DeleteTags",
+        "ecs:UntagResource",
+        "lambda:UntagResource",
+        "s3:DeleteBucketTagging",
+        "es:RemoveTags",
+        "dynamodb:UntagResource",
+        "logs:UntagResource",
+        "sns:UntagResource",
+        "secretsmanager:UntagResource",
+        "ecr:UntagResource",
+        "kms:UntagResource",
+        "states:UntagResource",
+        "events:RemoveTags",
+        "scheduler:UntagResource",
+        "apigateway:DELETE"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ForAnyValue:StringEquals": {
+          "aws:TagKeys": "UsedBy"
+        }
+      }
+    }
+  ]
+}

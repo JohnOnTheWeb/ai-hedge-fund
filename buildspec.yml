@@ -1,0 +1,46 @@
+# CodeBuild buildspec — single ARM64 image serving AgentCore Runtime,
+# Fargate analyst-driver, and 7 Lambda handlers (CMD override per consumer).
+#
+# Env vars injected by the CodeBuild project (see platform_stack.py):
+#   AWS_ACCOUNT_ID, AWS_REGION, ECR_REPOSITORY, ECR_URI
+#   IMAGE_SSM_URI, IMAGE_SSM_DIGEST, IMAGE_SSM_TAG
+version: 0.2
+
+env:
+  variables:
+    DOCKERFILE: "Dockerfile.app"
+    IMAGE_PLATFORM: "linux/arm64"
+
+phases:
+  pre_build:
+    commands:
+      - echo "CodeBuild started at $(date -u +%FT%TZ)"
+      - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+      - GIT_SHA="${CODEBUILD_RESOLVED_SOURCE_VERSION:-local}"
+      - SHORT_SHA=$(echo "$GIT_SHA" | cut -c1-12)
+      - echo "Will push $ECR_URI:$SHORT_SHA and $ECR_URI:latest"
+
+  build:
+    commands:
+      - docker buildx create --use --name aihedgebuilder 2>/dev/null || docker buildx use aihedgebuilder
+      - docker buildx inspect --bootstrap
+      - docker buildx build
+          --platform "$IMAGE_PLATFORM"
+          --provenance=false
+          --file "$DOCKERFILE"
+          --tag "$ECR_URI:latest"
+          --tag "$ECR_URI:$SHORT_SHA"
+          --push
+          .
+
+  post_build:
+    commands:
+      - DIGEST=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$SHORT_SHA" --query 'imageDetails[0].imageDigest' --output text)
+      - aws ssm put-parameter --name "$IMAGE_SSM_URI" --value "$ECR_URI" --type String --overwrite
+      - aws ssm put-parameter --name "$IMAGE_SSM_TAG" --value "$SHORT_SHA" --type String --overwrite
+      - aws ssm put-parameter --name "$IMAGE_SSM_DIGEST" --value "$DIGEST" --type String --overwrite
+      - printf '{"imageUri":"%s","imageTag":"%s","imageDigest":"%s"}\n' "$ECR_URI" "$SHORT_SHA" "$DIGEST" > imageDetail.json
+
+artifacts:
+  files:
+    - imageDetail.json

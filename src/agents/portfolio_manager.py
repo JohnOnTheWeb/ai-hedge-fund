@@ -1,4 +1,5 @@
 import json
+import os
 import time
 from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
@@ -8,6 +9,44 @@ from pydantic import BaseModel, Field
 from typing_extensions import Literal
 from src.utils.progress import progress
 from src.utils.llm import call_llm
+
+try:
+    # Optional — present when running in AWS; absent in local CLI context.
+    from src.tools.mcp_client import call_tool as _memory_call, gateway_enabled as _memory_enabled
+except ImportError:  # pragma: no cover
+    _memory_call = None
+    _memory_enabled = lambda: False  # noqa: E731
+
+
+def _past_context_for(ticker: str) -> dict:
+    """Fetch prior decisions + realized returns from the memory-log gateway target.
+
+    Returns {} when not running in-cluster or when the call fails. Never raises.
+    """
+    if not _memory_enabled() or os.environ.get("AIHEDGE_IN_CLUSTER") != "1":
+        return {}
+    try:
+        return _memory_call("get_past_context", {"ticker": ticker}) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _store_decision(ticker: str, trade_date: str, run_id: str, decision: dict, analyst_signals: dict) -> None:
+    if not _memory_enabled() or os.environ.get("AIHEDGE_IN_CLUSTER") != "1":
+        return
+    try:
+        _memory_call(
+            "store_decision",
+            {
+                "ticker": ticker,
+                "trade_date": trade_date,
+                "run_id": run_id,
+                "decision": decision,
+                "analyst_signals": analyst_signals,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class PortfolioDecision(BaseModel):
@@ -65,6 +104,11 @@ def portfolio_management_agent(state: AgentState, agent_id: str = "portfolio_man
 
     state["data"]["current_prices"] = current_prices
 
+    # Past-context injection (AWS only): recent same-ticker decisions + reflections.
+    past_context = {t: _past_context_for(t) for t in tickers}
+    if any(past_context.values()):
+        state["data"]["past_context"] = past_context
+
     progress.update_status(agent_id, None, "Generating trading decisions")
 
     result = generate_trading_decision(
@@ -84,6 +128,18 @@ def portfolio_management_agent(state: AgentState, agent_id: str = "portfolio_man
     if state["metadata"]["show_reasoning"]:
         show_agent_reasoning({ticker: decision.model_dump() for ticker, decision in result.decisions.items()},
                              "Portfolio Manager")
+
+    # Persist decisions for the next run to learn from (AWS only).
+    trade_date = state["data"].get("end_date") or ""
+    run_id = state.get("metadata", {}).get("run_id") or ""
+    for ticker, decision in result.decisions.items():
+        _store_decision(
+            ticker=ticker,
+            trade_date=trade_date,
+            run_id=run_id,
+            decision=decision.model_dump(),
+            analyst_signals={k: (v or {}).get(ticker) for k, v in analyst_signals.items() if (v or {}).get(ticker)},
+        )
 
     progress.update_status(agent_id, None, "Done")
 

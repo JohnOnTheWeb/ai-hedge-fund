@@ -1,0 +1,58 @@
+{
+  "app": "python app.py",
+  "watch": {
+    "include": ["**"],
+    "exclude": ["README.md", "cdk*.json", "**/*.pyc", "**/__pycache__", "tests", ".venv", "cdk.out"]
+  },
+  "context": {
+    "@aws-cdk/core:newStyleStackSynthesis": true,
+    "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/core:target-partitions": ["aws"],
+    "@aws-cdk/aws-ec2:uniqueImdsv2TemplateName": true,
+    "@aws-cdk/aws-ecs:arnFormatIncludesClusterName": true,
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "@aws-cdk/core:enablePartitionLiterals": true,
+    "@aws-cdk/aws-events:eventsTargetQueueSameAccount": true,
+    "@aws-cdk/core:stackRelativeExports": true,
+    "@aws-cdk/aws-stepfunctions-tasks:enableLogging": true,
+    "@aws-cdk/aws-apigateway:disableCloudWatchRole": true,
+
+    "aihedge:tag": "UsedBy",
+    "aihedge:tagValue": "AIHedge",
+    "aihedge:repoOwner": "JohnOnTheWeb",
+    "aihedge:repoName": "ai-hedge-fund",
+    "aihedge:repoBranch": "main",
+    "aihedge:emailTo": "jotw@amazon.com",
+    "aihedge:mdStorePrefix": "AIHedge",
+    "aihedge:logRetentionDays": 7,
+    "aihedge:models": {
+      "deep": "anthropic.claude-opus-4-7-20251015-v1:0",
+      "persona": "anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "analytical": "anthropic.claude-haiku-4-5-20251001"
+    },
+    "aihedge:modelAssignments": {
+      "portfolio_manager": "deep",
+      "risk_manager": "persona",
+      "aswath_damodaran": "persona",
+      "ben_graham": "persona",
+      "bill_ackman": "persona",
+      "cathie_wood": "persona",
+      "charlie_munger": "persona",
+      "michael_burry": "persona",
+      "mohnish_pabrai": "persona",
+      "nassim_taleb": "persona",
+      "peter_lynch": "persona",
+      "phil_fisher": "persona",
+      "rakesh_jhunjhunwala": "persona",
+      "stanley_druckenmiller": "persona",
+      "warren_buffett": "persona",
+      "fundamentals_analyst": "analytical",
+      "technical_analyst": "analytical",
+      "valuation_analyst": "analytical",
+      "sentiment_analyst": "analytical",
+      "news_sentiment_analyst": "analytical",
+      "growth_analyst": "analytical"
+    }
+  }
+}

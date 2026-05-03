@@ -21,6 +21,7 @@ from src.data.models import (
     InsiderTradeResponse,
     CompanyFactsResponse,
 )
+from src.tools.mcp_client import call_tool as _gw_call, gateway_enabled as _gw_on
 
 # Global cache instance
 _cache = get_cache()
@@ -64,10 +65,17 @@ def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None)
     """Fetch price data from cache or API."""
     # Create a cache key that includes all parameters to ensure exact matches
     cache_key = f"{ticker}_{start_date}_{end_date}"
-    
+
     # Check cache first - simple exact match
     if cached_data := _cache.get_prices(cache_key):
         return [Price(**price) for price in cached_data]
+
+    if _gw_on():
+        data = _gw_call("get_prices", {"ticker": ticker, "start_date": start_date, "end_date": end_date}) or []
+        prices = [Price(**p) for p in data]
+        if prices:
+            _cache.set_prices(cache_key, [p.model_dump() for p in prices])
+        return prices
 
     # If not in cache, fetch from API
     headers = {}
@@ -111,6 +119,13 @@ def get_financial_metrics(
     if cached_data := _cache.get_financial_metrics(cache_key):
         return [FinancialMetrics(**metric) for metric in cached_data]
 
+    if _gw_on():
+        data = _gw_call("get_financial_metrics", {"ticker": ticker, "end_date": end_date, "period": period, "limit": limit}) or []
+        metrics = [FinancialMetrics(**m) for m in data]
+        if metrics:
+            _cache.set_financial_metrics(cache_key, [m.model_dump() for m in metrics])
+        return metrics
+
     # If not in cache, fetch from API
     headers = {}
     financial_api_key = api_key or os.environ.get("FINANCIAL_DATASETS_API_KEY")
@@ -147,6 +162,13 @@ def search_line_items(
     api_key: str = None,
 ) -> list[LineItem]:
     """Fetch line items from API."""
+    if _gw_on():
+        data = _gw_call(
+            "search_line_items",
+            {"ticker": ticker, "line_items": line_items, "end_date": end_date, "period": period, "limit": limit},
+        ) or []
+        return [LineItem(**li) for li in data]
+
     # If not in cache or insufficient data, fetch from API
     headers = {}
     financial_api_key = api_key or os.environ.get("FINANCIAL_DATASETS_API_KEY")
@@ -190,10 +212,17 @@ def get_insider_trades(
     """Fetch insider trades from cache or API."""
     # Create a cache key that includes all parameters to ensure exact matches
     cache_key = f"{ticker}_{start_date or 'none'}_{end_date}_{limit}"
-    
+
     # Check cache first - simple exact match
     if cached_data := _cache.get_insider_trades(cache_key):
         return [InsiderTrade(**trade) for trade in cached_data]
+
+    if _gw_on():
+        data = _gw_call("get_insider_trades", {"ticker": ticker, "end_date": end_date, "limit": limit}) or []
+        trades = [InsiderTrade(**t) for t in data]
+        if trades:
+            _cache.set_insider_trades(cache_key, [t.model_dump() for t in trades])
+        return trades
 
     # If not in cache, fetch from API
     headers = {}
@@ -256,10 +285,17 @@ def get_company_news(
     """Fetch company news from cache or API."""
     # Create a cache key that includes all parameters to ensure exact matches
     cache_key = f"{ticker}_{start_date or 'none'}_{end_date}_{limit}"
-    
+
     # Check cache first - simple exact match
     if cached_data := _cache.get_company_news(cache_key):
         return [CompanyNews(**news) for news in cached_data]
+
+    if _gw_on():
+        data = _gw_call("get_company_news", {"ticker": ticker, "end_date": end_date, "limit": limit}) or []
+        news_list = [CompanyNews(**n) for n in data]
+        if news_list:
+            _cache.set_company_news(cache_key, [n.model_dump() for n in news_list])
+        return news_list
 
     # If not in cache, fetch from API
     headers = {}
@@ -318,6 +354,12 @@ def get_market_cap(
     api_key: str = None,
 ) -> float | None:
     """Fetch market cap from the API."""
+    if _gw_on():
+        result = _gw_call("get_market_cap", {"ticker": ticker, "end_date": end_date})
+        if isinstance(result, dict):
+            return result.get("market_cap")
+        return result
+
     # Check if end_date is today
     if end_date == datetime.datetime.now().strftime("%Y-%m-%d"):
         # Get the market cap from company facts API

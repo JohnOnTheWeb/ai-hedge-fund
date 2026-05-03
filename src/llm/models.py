@@ -19,6 +19,7 @@ class ModelProvider(str, Enum):
 
     ALIBABA = "Alibaba"
     ANTHROPIC = "Anthropic"
+    BEDROCK = "Bedrock"
     DEEPSEEK = "DeepSeek"
     GOOGLE = "Google"
     GROQ = "Groq"
@@ -230,6 +231,17 @@ def get_model(model_name: str, model_provider: ModelProvider, api_keys: dict = N
                 raise ValueError("GigaChat API key not found. Please make sure GIGACHAT_API_KEY is set in your .env file or provided via API keys.")
 
             return GigaChat(credentials=api_key, model=model_name)
+    elif model_provider == ModelProvider.BEDROCK:
+        # AWS Bedrock Converse — authenticated via the task/execution role on
+        # AgentCore Runtime, Fargate, and Lambda. No API key plumbed through
+        # `api_keys` dict; boto3 picks up credentials from the environment.
+        from langchain_aws import ChatBedrockConverse
+
+        region = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+        return ChatBedrockConverse(
+            model=model_name,
+            region_name=region,
+        )
     elif model_provider == ModelProvider.AZURE_OPENAI:
         # Get and validate API key
         api_key = os.getenv("AZURE_OPENAI_API_KEY")
