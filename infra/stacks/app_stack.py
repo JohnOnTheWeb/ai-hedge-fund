@@ -60,7 +60,7 @@ class AppStack(Stack):
         # placeholder string. Every container-image Lambda + Fargate task in
         # this stack would reject that at synth. We short-circuit instead, so
         # `cdk deploy AIHedge-App-Stack -c agentCoreEnabled=false` produces an
-        # empty stack. After CodePipeline pushes the first real image, redeploy
+        # empty stack. After CodeBuild pushes the first real image, redeploy
         # with `-c agentCoreEnabled=true` to fill in Runtime/Lambdas/Step Fn.
         if not agent_core_enabled:
             self._emit_placeholder_output()
@@ -593,7 +593,7 @@ class AppStack(Stack):
         CfnOutput(
             self,
             "BootstrapStatus",
-            value="agentCoreEnabled=false — redeploy with -c agentCoreEnabled=true after CodePipeline produces the first image",
+            value="agentCoreEnabled=false — redeploy with -c agentCoreEnabled=true after CodeBuild produces the first image",
         )
 
 

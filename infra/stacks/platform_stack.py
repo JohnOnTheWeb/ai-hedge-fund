@@ -1,9 +1,9 @@
 """Long-lived platform stack.
 
 Creates the resources that outlive a single feature iteration: VPC, endpoints,
-ECR, CodePipeline + CodeBuild, OpenSearch + AMP + OSIS, Secrets, KMS, AgentCore
-Gateway shell (runtime + targets are built in app_stack once the image exists),
-Config rule, and the permission boundary policy document.
+ECR, CodeBuild (direct GitHub source), OpenSearch + AMP + OSIS, Secrets, KMS,
+AgentCore Gateway shell (runtime + targets are built in app_stack once the
+image exists), Config rule, and the permission boundary policy document.
 
 OpenSearch / AMP / OSIS default to `RemovalPolicy.RETAIN` so historical traces
 survive app-stack teardown. Pass `-c platformDestroy=true` on `cdk destroy` to
@@ -15,12 +15,9 @@ import json
 from pathlib import Path
 
 import aws_cdk as cdk
-from aws_cdk import CfnOutput, Duration, RemovalPolicy, SecretValue, Stack
+from aws_cdk import CfnOutput, Duration, RemovalPolicy, Stack
 from aws_cdk import aws_aps as aps
 from aws_cdk import aws_codebuild as codebuild
-from aws_cdk import aws_codepipeline as codepipeline
-from aws_cdk import aws_codepipeline_actions as codepipeline_actions
-from aws_cdk import aws_codestarconnections as codestarconnections
 from aws_cdk import aws_config as config_
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_ecr as ecr
@@ -147,23 +144,12 @@ class PlatformStack(Stack):
         self.lambda_repo = _repo("aihedge-lambda", "LambdaRepo")
 
         # ------------------------------------------------------------------
-        # S3 buckets — config (watchlist + per-run JSONs), CodePipeline artifacts.
+        # S3 buckets — config (watchlist + per-run JSONs).
         # ------------------------------------------------------------------
         self.config_bucket = s3.Bucket(
             self,
             "ConfigBucket",
             bucket_name=f"aihedge-config-{self.account}-{self.region}",
-            encryption=s3.BucketEncryption.S3_MANAGED,
-            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
-            versioned=True,
-            removal_policy=RemovalPolicy.DESTROY,
-            auto_delete_objects=True,
-            enforce_ssl=True,
-        )
-
-        artifact_bucket = s3.Bucket(
-            self,
-            "ArtifactBucket",
             encryption=s3.BucketEncryption.S3_MANAGED,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             versioned=True,
@@ -207,15 +193,14 @@ class PlatformStack(Stack):
         )
 
         # ------------------------------------------------------------------
-        # CodePipeline — GitHub source → single CodeBuild → ECR push.
+        # CodeBuild — standalone project with a direct GitHub source.
+        #
+        # No CodePipeline / CodeConnections wrapper: that path requires a
+        # one-time console OAuth approval (PENDING connection). Standalone
+        # CodeBuild clones GitHub over HTTPS with a webhook-registered token
+        # on the build project, so `aws codebuild start-build` is the only
+        # trigger we need.
         # ------------------------------------------------------------------
-        self.codestar_connection = codestarconnections.CfnConnection(
-            self,
-            "GitHubConnection",
-            connection_name="aihedge-github",
-            provider_type="GitHub",
-            tags=[cdk.CfnTag(key="UsedBy", value="AIHedge")],
-        )
 
         # Names of the Lambda functions the app_stack creates (stable, known
         # at platform-stack synth time). buildspec rolls each by name after
@@ -231,10 +216,19 @@ class PlatformStack(Stack):
             "aihedge-run-status",
         ])
 
-        self.codebuild_project = codebuild.PipelineProject(
+        github_source = codebuild.Source.git_hub(
+            owner=repo_owner,
+            repo=repo_name,
+            branch_or_ref=repo_branch,
+            clone_depth=1,
+            webhook=False,
+        )
+
+        self.codebuild_project = codebuild.Project(
             self,
             "ImageBuild",
             project_name="aihedge-image-build",
+            source=github_source,
             environment=codebuild.BuildEnvironment(
                 build_image=codebuild.LinuxArmBuildImage.AMAZON_LINUX_2_STANDARD_3_0,
                 privileged=True,
@@ -291,43 +285,6 @@ class PlatformStack(Stack):
                 ],
                 resources=[f"arn:aws:lambda:{self.region}:{self.account}:function:aihedge-*"],
             )
-        )
-
-        source_artifact = codepipeline.Artifact("Source")
-        build_artifact = codepipeline.Artifact("Build")
-
-        pipeline = codepipeline.Pipeline(
-            self,
-            "ImagePipeline",
-            pipeline_name="aihedge-image-pipeline",
-            artifact_bucket=artifact_bucket,
-            stages=[
-                codepipeline.StageProps(
-                    stage_name="Source",
-                    actions=[
-                        codepipeline_actions.CodeStarConnectionsSourceAction(
-                            action_name="GitHub",
-                            owner=repo_owner,
-                            repo=repo_name,
-                            branch=repo_branch,
-                            connection_arn=self.codestar_connection.attr_connection_arn,
-                            output=source_artifact,
-                            trigger_on_push=True,
-                        )
-                    ],
-                ),
-                codepipeline.StageProps(
-                    stage_name="Build",
-                    actions=[
-                        codepipeline_actions.CodeBuildAction(
-                            action_name="DockerBuild",
-                            project=self.codebuild_project,
-                            input=source_artifact,
-                            outputs=[build_artifact],
-                        )
-                    ],
-                ),
-            ],
         )
 
         # ------------------------------------------------------------------
@@ -468,7 +425,7 @@ class PlatformStack(Stack):
         CfnOutput(self, "LambdaRepoUri", value=self.lambda_repo.repository_uri, export_name="AIHedgeLambdaRepoUri")
         CfnOutput(self, "ConfigBucketName", value=self.config_bucket.bucket_name, export_name="AIHedgeConfigBucket")
         CfnOutput(self, "VpcIdOut", value=self.vpc.vpc_id, export_name="AIHedgeVpcId")
-        CfnOutput(self, "CodePipelineName", value=pipeline.pipeline_name, export_name="AIHedgeCodePipelineName")
+        CfnOutput(self, "CodeBuildProjectName", value=self.codebuild_project.project_name, export_name="AIHedgeCodeBuildProjectName")
         CfnOutput(self, "PermissionBoundaryArn", value=self.permission_boundary.managed_policy_arn, export_name="AIHedgePermissionBoundaryArn")
         if self.osis_ingest_endpoint:
             CfnOutput(self, "OsisIngestEndpointOut", value=self.osis_ingest_endpoint)

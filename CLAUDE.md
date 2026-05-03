@@ -118,16 +118,16 @@ Quantitative pipeline: `data → signals → features → validation → backtes
 ## AWS deployment (`infra/`, `deploy/`, `scripts/`, `Dockerfile.app`, `buildspec.yml`, `statemachine/`)
 
 Two-stack CDK-Python app:
-- `AIHedge-Platform-Stack` — VPC, ECR, CodePipeline/CodeBuild, OpenSearch, AMP, OSIS, Gateway shell, KMS, Secrets, Config rule. Long-lived.
+- `AIHedge-Platform-Stack` — VPC, ECR, CodeBuild (direct GitHub source), OpenSearch, AMP, OSIS, Gateway shell, KMS, Secrets, Config rule. Long-lived.
 - `AIHedge-App-Stack` — AgentCore Runtime + Gateway Lambda targets, Fargate, Step Functions, APIGW HTTP API (IAM auth), EventBridge daily cron, DynamoDB memory log, SNS. Push-button destroy.
 
 Tag enforcement is 3-layered: CDK aspect (synth-time), IAM permission boundary (request-time), AWS Config `required-tags` rule (runtime drift). Mandatory tag: `UsedBy=AIHedge`.
 
 Non-obvious operational facts:
 
-- **CodeBuild clones from GitHub, not your local tree.** Source is `JohnOnTheWeb/ai-hedge-fund@main`. `git push` before triggering the pipeline — local edits are invisible otherwise.
-- **Two-phase deploy.** First `cdk deploy AIHedge-Platform-Stack` (ECR, CodePipeline, Gateway shell); trigger CodePipeline; then `cdk deploy AIHedge-App-Stack -c agentCoreEnabled=true` creates the Runtime + Gateway targets + Lambdas + Step Fn. Deploying the app stack without `agentCoreEnabled=true` produces an empty stack by design — the container-image Lambdas can't synth against the placeholder digest.
-- **Manual console steps between phases.** (1) After Phase 1: accept the CodeStar `aihedge-github` connection in the AWS Developer Tools console — it starts in `PENDING` and blocks CodePipeline until OAuth completes. (2) Before Phase 3: request Bedrock model access for the three Claude model IDs (Opus 4.7, Sonnet 4.5, Haiku 4.5) in the Bedrock console. Both prompts are in `scripts/bootstrap.sh`.
+- **CodeBuild clones from GitHub, not your local tree.** Source is `JohnOnTheWeb/ai-hedge-fund@main`, configured directly on the CodeBuild project (no CodePipeline / CodeConnections wrapper). `git push` before triggering a build — local edits are invisible otherwise.
+- **Two-phase deploy.** First `cdk deploy AIHedge-Platform-Stack` (ECR, CodeBuild, Gateway shell); trigger CodeBuild via `aws codebuild start-build --project-name aihedge-image-build`; then `cdk deploy AIHedge-App-Stack -c agentCoreEnabled=true` creates the Runtime + Gateway targets + Lambdas + Step Fn. Deploying the app stack without `agentCoreEnabled=true` produces an empty stack by design — the container-image Lambdas can't synth against the placeholder digest.
+- **Manual console step between phases.** Before Phase 3: request Bedrock model access for the three Claude model IDs (Opus 4.7, Sonnet 4.5, Haiku 4.5) in the Bedrock console. Prompt is in `scripts/bootstrap.sh`.
 - **`cdk synth` needs `cdk.context.json`.** The app stack reads image URI/tag/digest from SSM via `value_from_lookup`, which writes the resolved values to `infra/cdk.context.json` on first run. If you delete that file or synth in a fresh checkout, the first synth produces placeholders and subsequent ones resolve. Don't hand-edit it — regenerate with `cdk synth`.
 - **Two images, two ECR repos.** `Dockerfile.agentcore` (python:3.11-slim) builds the AgentCore Runtime + Fargate image → `aihedge-app`. `Dockerfile.lambda` (public.ecr.aws/lambda/python:3.11) builds the Lambda image → `aihedge-lambda`. Do **not** try to serve Lambdas from the slim-base image — TauricResearch proved Lambda rejects every exec path (including `/bin/sh`) on that base, regardless of `chmod`. Both images are built in the same CodeBuild run.
 - **After every image push**, the buildspec's post_build (a) calls `bedrock-agentcore-control update-agent-runtime` to force the Runtime to re-pull and (b) loops `aws lambda update-function-code` over every Lambda name (see `LAMBDA_FUNCTION_NAMES` in platform_stack). CloudFormation doesn't detect container image changes on a tag move, so without this both the Runtime and Lambdas would stay pinned to the first-pushed digest.

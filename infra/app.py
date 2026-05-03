@@ -10,7 +10,7 @@ Two stacks:
 
 Two-phase rollout driven by context flags:
   cdk deploy -c agentCoreEnabled=false                    # first pass (no Runtime yet)
-  # trigger CodePipeline → image in ECR
+  # trigger CodeBuild → image in ECR
   cdk deploy -c agentCoreEnabled=true                     # Runtime + Gateway targets
   cdk deploy -c agentCoreEnabled=true -c observabilityEnabled=true   # OTel wiring
 """
@@ -88,6 +88,10 @@ for stack in (platform, app_stack):
             {
                 "id": "AwsSolutions-SMG4",
                 "reason": "Secrets (FinancialDatasets key, MD-Store token, OpenSearch master) are issued by external services or human operators — Secrets Manager automatic rotation doesn't apply.",
+            },
+            {
+                "id": "AwsSolutions-CB3",
+                "reason": "Privileged mode is required: the CodeBuild project runs docker buildx to produce the AgentCore/Fargate and Lambda container images.",
             },
             {
                 "id": "AwsSolutions-CB4",

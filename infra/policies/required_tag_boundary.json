@@ -29,7 +29,6 @@
         "secretsmanager:CreateSecret",
         "ecr:CreateRepository",
         "codebuild:CreateProject",
-        "codepipeline:CreatePipeline",
         "kms:CreateKey",
         "bedrock-agentcore:CreateGateway",
         "bedrock-agentcore:CreateAgentRuntime"

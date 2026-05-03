@@ -2,15 +2,16 @@
 # Two-phase bootstrap for AI-HedgeFund AWS deployment.
 #
 # Phase 0: seed secrets + cdk bootstrap
-# Phase 1: deploy platform + app with agentCoreEnabled=false (provisions ECR, CodePipeline, Gateway shell)
-# Phase 2: trigger CodePipeline, wait for image
+# Phase 1: deploy platform with agentCoreEnabled=false (provisions ECR, CodeBuild, Gateway shell)
+# Phase 2: trigger CodeBuild directly, wait for image
 # Phase 3: cdk deploy AIHedge-App-Stack with agentCoreEnabled=true
 # Phase 4 (optional): enable observability
 set -euo pipefail
 
 PROFILE="${AWS_PROFILE:-IGENV}"
 REGION="${AWS_REGION:-us-east-1}"
-ACCOUNT="${AWS_ACCOUNT_ID:-264207762605}"
+ACCOUNT="${AWS_ACCOUNT_ID:-590183796434}"
+BUILD_PROJECT="aihedge-image-build"
 
 echo ">>> Using profile=$PROFILE region=$REGION account=$ACCOUNT"
 
@@ -20,18 +21,10 @@ python scripts/seed_secrets.py --profile "$PROFILE" --region "$REGION"
 # --- Phase 0b — cdk bootstrap ---
 (cd infra && cdk bootstrap "aws://$ACCOUNT/$REGION" --profile "$PROFILE")
 
-# --- Phase 1 — platform only (creates ECR, CodePipeline, Gateway shell) ---
+# --- Phase 1 — platform only (creates ECR, CodeBuild, Gateway shell) ---
 (cd infra && cdk deploy AIHedge-Platform-Stack \
     --require-approval never \
     --profile "$PROFILE")
-
-echo ""
-echo ">>> MANUAL STEP REQUIRED: accept the GitHub connection"
-echo "    1. Open https://console.aws.amazon.com/codesuite/settings/connections?region=$REGION"
-echo "    2. Find 'aihedge-github', status should be PENDING"
-echo "    3. Click 'Update pending connection' → authorize via GitHub OAuth"
-echo "    Press ENTER when done..."
-read -r _
 
 echo ""
 echo ">>> MANUAL STEP REQUIRED: request Bedrock model access"
@@ -44,24 +37,23 @@ echo "    Press ENTER when all three show Access granted..."
 read -r _
 
 # --- Phase 2 — build the image ---
-echo ">>> Starting CodePipeline execution"
-EXEC_ID=$(aws codepipeline start-pipeline-execution \
-    --name aihedge-image-pipeline \
+echo ">>> Starting CodeBuild project $BUILD_PROJECT"
+BUILD_ID=$(aws codebuild start-build \
+    --project-name "$BUILD_PROJECT" \
     --profile "$PROFILE" --region "$REGION" \
-    --query 'pipelineExecutionId' --output text)
-echo ">>> Execution $EXEC_ID — waiting for build..."
+    --query 'build.id' --output text)
+echo ">>> Build $BUILD_ID — waiting..."
 
 while :; do
-    STATUS=$(aws codepipeline get-pipeline-execution \
-        --pipeline-name aihedge-image-pipeline \
-        --pipeline-execution-id "$EXEC_ID" \
+    STATUS=$(aws codebuild batch-get-builds \
+        --ids "$BUILD_ID" \
         --profile "$PROFILE" --region "$REGION" \
-        --query 'pipelineExecution.status' --output text)
+        --query 'builds[0].buildStatus' --output text)
     echo "  status=$STATUS"
     case "$STATUS" in
-        Succeeded) break ;;
-        Failed|Stopped|Cancelled|Superseded)
-            echo "Pipeline did not succeed ($STATUS)"; exit 1 ;;
+        SUCCEEDED) break ;;
+        FAILED|FAULT|STOPPED|TIMED_OUT)
+            echo "Build did not succeed ($STATUS)"; exit 1 ;;
     esac
     sleep 30
 done
