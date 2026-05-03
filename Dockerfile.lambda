@@ -1,0 +1,36 @@
+# Lambda-target image (data-tools, memory-log, get-config, aggregate,
+# run-trigger, run-status, error-handler).
+#
+# MUST be built on the AWS Lambda Python base image. TauricResearch confirmed
+# 2026-05-02 that generic slim bases (python:3.11-slim etc.) produce images
+# that Lambda's runtime rejects with Runtime.InvalidEntrypoint for every exec
+# path including /bin/sh — not a chmod bug; a base-image interaction.
+#
+# The AWS base ships awslambdaric pre-installed and uses LAMBDA_TASK_ROOT.
+# Each function sets its own CMD to the dotted handler path.
+FROM --platform=linux/arm64 public.ecr.aws/lambda/python:3.11
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# Install project deps. Poetry is skipped — the Lambda base image lacks
+# build-essential by default and we only need a few packages.
+RUN pip install --upgrade pip \
+    && pip install \
+        "boto3>=1.34" \
+        "requests>=2.32" \
+        "pydantic>=2.4" \
+        "opentelemetry-api>=1.27" \
+        "opentelemetry-sdk>=1.27" \
+        "opentelemetry-exporter-otlp-proto-http>=1.27" \
+        "opentelemetry-instrumentation-botocore>=0.48b0" \
+        "opentelemetry-instrumentation-requests>=0.48b0"
+
+# LAMBDA_TASK_ROOT is /var/task on the public lambda image. Copy only the
+# code paths a Lambda actually needs (no src/, no langchain dependencies).
+COPY deploy/ ${LAMBDA_TASK_ROOT}/deploy/
+COPY src/ ${LAMBDA_TASK_ROOT}/src/
+
+# Default CMD is overridden by each Lambda's cmd=["<dotted.handler>"].
+CMD ["deploy.app.lambdas.data_tools.handler.handler"]

@@ -201,8 +201,12 @@ class AppStack(Stack):
         # synth-time lookups). CodeBuild populates these in its post_build.
         # Synth succeeds even before the first build; the Lambda container
         # images just won't resolve until deploy time.
-        image_tag = ssm.StringParameter.value_for_string_parameter(self, "/aihedge/image/tag")
-        image_digest = ssm.StringParameter.value_for_string_parameter(self, "/aihedge/image/digest")
+        # AgentCore + Fargate image (slim python base).
+        image_tag = ssm.StringParameter.value_for_string_parameter(self, "/aihedge/image/app/tag")
+        image_digest = ssm.StringParameter.value_for_string_parameter(self, "/aihedge/image/app/digest")
+        # Lambda image (public.ecr.aws/lambda/python base — required by Lambda runtime).
+        lambda_tag = ssm.StringParameter.value_for_string_parameter(self, "/aihedge/image/lambda/tag")
+        lambda_digest = ssm.StringParameter.value_for_string_parameter(self, "/aihedge/image/lambda/digest")
         osis_endpoint_param = platform.osis_ingest_endpoint if observability_enabled and platform.osis_ingest_endpoint else ""
 
         runtime_env = {
@@ -229,11 +233,13 @@ class AppStack(Stack):
 
         data_tools_spec = LambdaTargetSpec(
             target_name="data-tools",
+            function_name="aihedge-data-tools",
             handler_cmd=["deploy.app.lambdas.data_tools.handler.handler"],
             tool_schemas=_data_tool_schemas(),
         )
         memory_log_spec = LambdaTargetSpec(
             target_name="memory-log",
+            function_name="aihedge-memory-log",
             handler_cmd=["deploy.app.lambdas.memory_log.handler.handler"],
             tool_schemas=_memory_tool_schemas(),
         )
@@ -243,9 +249,13 @@ class AppStack(Stack):
             self.bundle = AgentRuntimeBundle(
                 self,
                 "AgentCore",
+                # AgentCore Runtime image (slim python, Dockerfile.agentcore)
                 image_repo=platform.image_repo,
-                image_tag=image_tag,  # Runtime uses tag; post-build calls update-agent-runtime to force re-pull
+                image_tag=image_tag,  # Runtime uses tag; post-build update-agent-runtime forces re-pull
                 image_digest=image_digest,
+                # Lambda target image (public.ecr.aws/lambda/python, Dockerfile.lambda)
+                lambda_repo=platform.lambda_repo,
+                lambda_digest=lambda_digest,
                 runtime_role=runtime_role,
                 gateway_role=gateway_role,
                 lambda_targets=[
@@ -326,17 +336,26 @@ class AppStack(Stack):
 
         # ------------------------------------------------------------------
         # Glue Lambdas — get-config, aggregate, run-trigger, run-status, error.
-        # All share the same ECR image, differ only by CMD handler.
+        # All pull from the dedicated Lambda image repo (public.ecr.aws/lambda
+        # base); each differs only by CMD (the dotted handler path). Explicit
+        # function_name keeps the buildspec post-build `update-function-code`
+        # roll stable across redeploys.
         # ------------------------------------------------------------------
-        def _lambda(name: str, handler_path: str, role: iam.IRole, env: dict | None = None) -> lambda_.Function:
+        def _lambda(
+            construct_id: str,
+            function_name: str,
+            handler_path: str,
+            role: iam.IRole,
+            env: dict | None = None,
+        ) -> lambda_.Function:
             return lambda_.Function(
                 self,
-                f"Lambda{name.replace('-', '').title()}",
+                construct_id,
+                function_name=function_name,
                 runtime=lambda_.Runtime.FROM_IMAGE,
                 code=lambda_.Code.from_ecr_image(
-                    repository=platform.image_repo,
-                    tag_or_digest=image_digest,  # pin Lambdas by digest so new builds actually roll
-                    entrypoint=["python", "-m", "awslambdaric"],
+                    repository=platform.lambda_repo,
+                    tag_or_digest=lambda_digest,
                     cmd=[handler_path],
                 ),
                 handler=lambda_.Handler.FROM_IMAGE,
@@ -365,12 +384,14 @@ class AppStack(Stack):
 
         get_config_fn = _lambda(
             "GetConfig",
+            "aihedge-get-config",
             "deploy.app.lambdas.get_config.handler.handler",
             glue_role,
             {"AIHEDGE_CONFIG_BUCKET": platform.config_bucket.bucket_name},
         )
         aggregate_fn = _lambda(
             "Aggregate",
+            "aihedge-aggregate",
             "deploy.app.lambdas.aggregate.handler.handler",
             glue_role,
             {
@@ -380,6 +401,7 @@ class AppStack(Stack):
         )
         error_fn = _lambda(
             "ErrorHandler",
+            "aihedge-error-handler",
             "deploy.app.lambdas.error_handler.handler.handler",
             glue_role,
             {"AIHEDGE_SUMMARY_TOPIC_ARN": self.summary_topic.topic_arn},
@@ -395,11 +417,13 @@ class AppStack(Stack):
         )
         run_trigger_fn = _lambda(
             "RunTrigger",
+            "aihedge-run-trigger",
             "deploy.app.lambdas.run_trigger.handler.handler",
             sfn_caller_role,
         )
         run_status_fn = _lambda(
             "RunStatus",
+            "aihedge-run-status",
             "deploy.app.lambdas.run_status.handler.handler",
             sfn_caller_role,
         )

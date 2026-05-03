@@ -5,10 +5,12 @@ Table: aihedge-memory-log
   SK trade_date_run        (S)  e.g. "2026-05-02#<run_id>"
   attrs: decision, analyst_signals, cost_usd, tokens, pending (bool),
          realized_return_raw, realized_return_vs_spy, ttl
+
+Event shape: see data_tools.handler — same Gateway contract (tool name in
+context.client_context.custom, args splatted on event).
 """
 from __future__ import annotations
 
-import json
 import os
 import time
 from datetime import datetime, timedelta
@@ -18,6 +20,7 @@ import boto3
 from boto3.dynamodb.conditions import Key
 
 _TTL_DAYS = 400
+_META_KEYS = frozenset({"toolName", "name", "arguments", "input", "tool_name"})
 
 
 def _table():
@@ -45,13 +48,33 @@ def _to_json_safe(obj):
     return obj
 
 
-def handler(event, _context):
-    raw_name = event.get("toolName") or event.get("name") or ""
-    name = raw_name.split("___", 1)[-1] if "___" in raw_name else raw_name
-    args = event.get("arguments") or event.get("input") or {}
+def _resolve_tool_name_and_args(event: dict, context) -> tuple[str, dict]:
+    raw_name = ""
+    client_ctx = getattr(context, "client_context", None)
+    custom = getattr(client_ctx, "custom", None) if client_ctx else None
+    if custom:
+        raw_name = custom.get("bedrockAgentCoreToolName") or ""
+
+    if not raw_name:
+        raw_name = event.get("toolName") or event.get("name") or event.get("tool_name") or ""
+
+    tool_name = raw_name.rsplit("___", 1)[-1] if "___" in raw_name else raw_name
+
+    if "arguments" in event and isinstance(event["arguments"], dict):
+        args = event["arguments"]
+    elif "input" in event and isinstance(event["input"], dict):
+        args = event["input"]
+    else:
+        args = {k: v for k, v in event.items() if k not in _META_KEYS}
+
+    return tool_name, args
+
+
+def handler(event, context):
+    tool_name, args = _resolve_tool_name_and_args(event or {}, context)
     tbl = _table()
 
-    if name == "get_past_context":
+    if tool_name == "get_past_context":
         ticker = args["ticker"]
         same_limit = int(args.get("same_ticker_limit", 5))
         cross_limit = int(args.get("cross_ticker_limit", 10))
@@ -61,17 +84,16 @@ def handler(event, _context):
             ScanIndexForward=False,
             Limit=same_limit,
         ).get("Items", [])
-        # Cross-ticker lessons: a scan with limit is acceptable at 400-day TTL scale.
         cross = tbl.scan(Limit=cross_limit).get("Items", [])
         return {
-            "tool_name": raw_name,
+            "tool_name": tool_name,
             "result": {
                 "same_ticker": [_to_json_safe(i) for i in same],
                 "cross_ticker": [_to_json_safe(i) for i in cross],
             },
         }
 
-    if name == "store_decision":
+    if tool_name == "store_decision":
         ticker = args["ticker"]
         trade_date = args["trade_date"]
         run_id = args["run_id"]
@@ -90,9 +112,9 @@ def handler(event, _context):
             "ttl": ttl,
         }
         tbl.put_item(Item=item)
-        return {"tool_name": raw_name, "result": {"stored": True, "key": item["trade_date_run"]}}
+        return {"tool_name": tool_name, "result": {"stored": True, "key": item["trade_date_run"]}}
 
-    if name == "get_pending_entries":
+    if tool_name == "get_pending_entries":
         ticker = args["ticker"]
         older_than_days = int(args.get("older_than_days", 1))
         cutoff = (datetime.utcnow() - timedelta(days=older_than_days)).strftime("%Y-%m-%d")
@@ -102,9 +124,9 @@ def handler(event, _context):
             Limit=20,
         ).get("Items", [])
         pending = [i for i in items if i.get("pending")]
-        return {"tool_name": raw_name, "result": [_to_json_safe(i) for i in pending]}
+        return {"tool_name": tool_name, "result": [_to_json_safe(i) for i in pending]}
 
-    if name == "update_realized_returns":
+    if tool_name == "update_realized_returns":
         tbl.update_item(
             Key={"ticker": args["ticker"], "trade_date_run": args["trade_date_run"]},
             UpdateExpression="SET realized_return_raw=:r, realized_return_vs_spy=:s, pending=:p",
@@ -114,6 +136,6 @@ def handler(event, _context):
                 ":p": False,
             },
         )
-        return {"tool_name": raw_name, "result": {"updated": True}}
+        return {"tool_name": tool_name, "result": {"updated": True}}
 
-    return {"error": f"unknown tool: {raw_name}"}
+    return {"error": f"unknown tool: {tool_name}"}

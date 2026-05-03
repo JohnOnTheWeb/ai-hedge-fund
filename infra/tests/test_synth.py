@@ -51,8 +51,9 @@ def test_synth_first_pass():
     platform_template = Template.from_stack(platform)
     app_template = Template.from_stack(app_stack)
 
-    # Platform must have the ECR repo (always present).
-    platform_template.resource_count_is("AWS::ECR::Repository", 1)
+    # Platform has two ECR repos: aihedge-app (slim base for Runtime/Fargate)
+    # and aihedge-lambda (public.ecr.aws/lambda/python base).
+    platform_template.resource_count_is("AWS::ECR::Repository", 2)
 
     # First-pass app stack is empty (agentCoreEnabled default-false): no
     # Step Functions, no Lambdas — just the bootstrap-status output.

@@ -1,0 +1,50 @@
+# AgentCore Runtime + Fargate image.
+#
+# NOT used for Lambda targets. Lambda requires public.ecr.aws/lambda/python:*
+# (see Dockerfile.lambda + TauricResearch incident 2026-05-02). Shoehorning a
+# slim base into Lambda causes Runtime.InvalidEntrypoint that no amount of
+# chmod fixes.
+#
+# Consumers:
+#   AgentCore Runtime:   CMD runs uvicorn on :8080 (default below)
+#   Fargate driver:      command=["python","-m","deploy.app.task_runner"]
+FROM --platform=linux/arm64 public.ecr.aws/docker/library/python:3.11-slim-bookworm AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    POETRY_VIRTUALENVS_CREATE=false
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       build-essential libcurl4-openssl-dev ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml poetry.lock /app/
+RUN pip install --upgrade pip \
+    && pip install "poetry==1.8.3" \
+    && poetry export -f requirements.txt --without-hashes --output /app/requirements.txt \
+    && pip install -r /app/requirements.txt
+
+RUN pip install \
+        "langchain-aws>=0.2.6" \
+        "boto3>=1.34" \
+        "fastapi>=0.115" \
+        "uvicorn[standard]>=0.30" \
+        "opentelemetry-api>=1.27" \
+        "opentelemetry-sdk>=1.27" \
+        "opentelemetry-exporter-otlp-proto-http>=1.27" \
+        "opentelemetry-instrumentation-botocore>=0.48b0" \
+        "opentelemetry-instrumentation-httpx>=0.48b0" \
+        "opentelemetry-instrumentation-requests>=0.48b0" \
+        "requests-aws4auth>=1.3.1"
+
+COPY src/ /app/src/
+COPY deploy/ /app/deploy/
+
+EXPOSE 8080
+
+ENTRYPOINT []
+CMD ["python", "-m", "uvicorn", "deploy.app.runtime:app", "--host", "0.0.0.0", "--port", "8080"]

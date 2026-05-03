@@ -20,15 +20,15 @@ from constructs import Construct
 class LambdaTargetSpec:
     """One Lambda-backed MCP target registered on the gateway."""
 
-    target_name: str          # e.g. "data-tools"
-    handler_cmd: list[str]    # container CMD — dotted handler path, e.g. ["deploy.app.lambdas.data_tools.handler.handler"]
+    target_name: str          # MCP target name, e.g. "data-tools"
+    function_name: str        # Stable Lambda function name — used by buildspec rolls
+    handler_cmd: list[str]    # container CMD — dotted handler path
     tool_schemas: list[dict]  # JSON schemas served as MCP tool catalog
 
 
-# awslambdaric is the AWS Lambda Runtime Interface Client — every
-# container-image Lambda runs it as ENTRYPOINT and passes the dotted handler
-# path as CMD. The image ships it via `pip install awslambdaric` (see Dockerfile).
-_LAMBDA_ENTRYPOINT = ["python", "-m", "awslambdaric"]
+# Lambda container images from public.ecr.aws/lambda/python:* ship with
+# awslambdaric pre-installed as the default ENTRYPOINT. We don't override it;
+# each function just sets CMD to the dotted handler path.
 
 
 class AgentRuntimeBundle(Construct):
@@ -42,6 +42,8 @@ class AgentRuntimeBundle(Construct):
         image_repo: ecr.IRepository,
         image_tag: str,
         image_digest: str,
+        lambda_repo: ecr.IRepository,
+        lambda_digest: str,
         runtime_role: iam.IRole,
         gateway_role: iam.IRole,
         lambda_targets: list[tuple[LambdaTargetSpec, iam.IRole]],
@@ -112,11 +114,14 @@ class AgentRuntimeBundle(Construct):
             fn = lambda_.Function(
                 self,
                 f"Lambda{spec.target_name.replace('-', '').title()}",
+                function_name=spec.function_name,
                 runtime=lambda_.Runtime.FROM_IMAGE,
+                # Use the Lambda-specific image (public.ecr.aws/lambda/python base).
+                # Generic slim bases fail every invocation with Runtime.InvalidEntrypoint
+                # regardless of chmod (TauricResearch 2026-05-02).
                 code=lambda_.Code.from_ecr_image(
-                    repository=image_repo,
-                    tag_or_digest=image_digest,  # digest so new builds trigger CFN update
-                    entrypoint=_LAMBDA_ENTRYPOINT,
+                    repository=lambda_repo,
+                    tag_or_digest=lambda_digest,
                     cmd=spec.handler_cmd,
                 ),
                 handler=lambda_.Handler.FROM_IMAGE,
@@ -127,7 +132,7 @@ class AgentRuntimeBundle(Construct):
                 log_retention=log_retention,
                 environment={
                     "AIHEDGE_IN_CLUSTER": "1",
-                    "POWERTOOLS_SERVICE_NAME": f"aihedge-{spec.target_name}",
+                    "POWERTOOLS_SERVICE_NAME": spec.function_name,
                 },
             )
             self.target_functions[spec.target_name] = fn

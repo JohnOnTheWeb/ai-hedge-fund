@@ -1,14 +1,24 @@
-# CodeBuild buildspec — single ARM64 image serving AgentCore Runtime,
-# Fargate analyst-driver, and 7 Lambda handlers (CMD override per consumer).
+# CodeBuild buildspec — builds TWO ARM64 images per run.
+#
+#   aihedge-app (Dockerfile.agentcore)   → AgentCore Runtime + Fargate driver
+#   aihedge-lambda (Dockerfile.lambda)   → all 7 MCP target + glue Lambdas
+#
+# Why two images: public.ecr.aws/lambda/python:3.11 is required for Lambda
+# container images; generic slim bases fail every invocation with
+# Runtime.InvalidEntrypoint regardless of chmod (TauricResearch incident
+# 2026-05-02).
 #
 # Env vars injected by the CodeBuild project (see platform_stack.py):
-#   AWS_ACCOUNT_ID, AWS_REGION, ECR_REPOSITORY, ECR_URI
-#   IMAGE_SSM_URI, IMAGE_SSM_DIGEST, IMAGE_SSM_TAG
+#   AWS_ACCOUNT_ID, AWS_REGION
+#   ECR_REPOSITORY_APP, ECR_URI_APP
+#   ECR_REPOSITORY_LAMBDA, ECR_URI_LAMBDA
+#   IMAGE_SSM_APP_URI, IMAGE_SSM_APP_TAG, IMAGE_SSM_APP_DIGEST
+#   IMAGE_SSM_LAMBDA_URI, IMAGE_SSM_LAMBDA_TAG, IMAGE_SSM_LAMBDA_DIGEST
+#   LAMBDA_FUNCTION_NAMES  (comma-separated, e.g. "aihedge-data-tools,aihedge-memory-log,...")
 version: 0.2
 
 env:
   variables:
-    DOCKERFILE: "Dockerfile.app"
     IMAGE_PLATFORM: "linux/arm64"
 
 phases:
@@ -18,31 +28,44 @@ phases:
       - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
       - GIT_SHA="${CODEBUILD_RESOLVED_SOURCE_VERSION:-local}"
       - SHORT_SHA=$(echo "$GIT_SHA" | cut -c1-12)
-      - echo "Will push $ECR_URI:$SHORT_SHA and $ECR_URI:latest"
+      - echo "Will push $ECR_URI_APP:$SHORT_SHA and $ECR_URI_LAMBDA:$SHORT_SHA"
 
   build:
     commands:
       - docker buildx create --use --name aihedgebuilder 2>/dev/null || docker buildx use aihedgebuilder
       - docker buildx inspect --bootstrap
+      # AgentCore + Fargate image
       - docker buildx build
           --platform "$IMAGE_PLATFORM"
           --provenance=false
-          --file "$DOCKERFILE"
-          --tag "$ECR_URI:latest"
-          --tag "$ECR_URI:$SHORT_SHA"
+          --file Dockerfile.agentcore
+          --tag "$ECR_URI_APP:latest"
+          --tag "$ECR_URI_APP:$SHORT_SHA"
+          --push
+          .
+      # Lambda image
+      - docker buildx build
+          --platform "$IMAGE_PLATFORM"
+          --provenance=false
+          --file Dockerfile.lambda
+          --tag "$ECR_URI_LAMBDA:latest"
+          --tag "$ECR_URI_LAMBDA:$SHORT_SHA"
           --push
           .
 
   post_build:
     commands:
-      - DIGEST=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$SHORT_SHA" --query 'imageDetails[0].imageDigest' --output text)
-      - aws ssm put-parameter --name "$IMAGE_SSM_URI" --value "$ECR_URI" --type String --overwrite
-      - aws ssm put-parameter --name "$IMAGE_SSM_TAG" --value "$SHORT_SHA" --type String --overwrite
-      - aws ssm put-parameter --name "$IMAGE_SSM_DIGEST" --value "$DIGEST" --type String --overwrite
-      - printf '{"imageUri":"%s","imageTag":"%s","imageDigest":"%s"}\n' "$ECR_URI" "$SHORT_SHA" "$DIGEST" > imageDetail.json
-      # Force the AgentCore Runtime to re-pull :latest (it pins by digest internally, so a new
-      # :latest tag without a control-plane nudge is invisible). Best-effort; skipped when the
-      # Runtime doesn't exist yet (first deploy, agentCoreEnabled=false).
+      # --- Capture digests + publish SSM params for CDK to read ---
+      - APP_DIGEST=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY_APP" --image-ids imageTag="$SHORT_SHA" --query 'imageDetails[0].imageDigest' --output text)
+      - LAMBDA_DIGEST=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY_LAMBDA" --image-ids imageTag="$SHORT_SHA" --query 'imageDetails[0].imageDigest' --output text)
+      - aws ssm put-parameter --name "$IMAGE_SSM_APP_URI" --value "$ECR_URI_APP" --type String --overwrite
+      - aws ssm put-parameter --name "$IMAGE_SSM_APP_TAG" --value "$SHORT_SHA" --type String --overwrite
+      - aws ssm put-parameter --name "$IMAGE_SSM_APP_DIGEST" --value "$APP_DIGEST" --type String --overwrite
+      - aws ssm put-parameter --name "$IMAGE_SSM_LAMBDA_URI" --value "$ECR_URI_LAMBDA" --type String --overwrite
+      - aws ssm put-parameter --name "$IMAGE_SSM_LAMBDA_TAG" --value "$SHORT_SHA" --type String --overwrite
+      - aws ssm put-parameter --name "$IMAGE_SSM_LAMBDA_DIGEST" --value "$LAMBDA_DIGEST" --type String --overwrite
+
+      # --- Roll the AgentCore Runtime so it re-pulls the new image ---
       - |
         RUNTIME_ID=$(aws bedrock-agentcore-control list-agent-runtimes \
             --query "agentRuntimes[?agentRuntimeName=='aihedge_runtime'].agentRuntimeId | [0]" \
@@ -51,11 +74,32 @@ phases:
           echo "Updating AgentCore Runtime $RUNTIME_ID to pick up $SHORT_SHA"
           aws bedrock-agentcore-control update-agent-runtime \
               --agent-runtime-id "$RUNTIME_ID" \
-              --agent-runtime-artifact "containerConfiguration={containerUri=$ECR_URI:$SHORT_SHA}" \
+              --agent-runtime-artifact "containerConfiguration={containerUri=$ECR_URI_APP:$SHORT_SHA}" \
               --network-configuration '{"networkMode":"PUBLIC"}'
         else
-          echo "No AgentCore Runtime yet; skipping update."
+          echo "No AgentCore Runtime yet; skipping Runtime update."
         fi
+
+      # --- Roll every Lambda so the new image digest is actually deployed ---
+      # (CloudFormation doesn't detect container image changes on a tag move.
+      #  TauricResearch: "every Lambda needs update-function-code after build".)
+      - |
+        if [ -n "$LAMBDA_FUNCTION_NAMES" ]; then
+          for fn in $(echo "$LAMBDA_FUNCTION_NAMES" | tr ',' ' '); do
+            if aws lambda get-function --function-name "$fn" >/dev/null 2>&1; then
+              echo "Rolling $fn to $ECR_URI_LAMBDA:$SHORT_SHA"
+              aws lambda update-function-code \
+                  --function-name "$fn" \
+                  --image-uri "$ECR_URI_LAMBDA:$SHORT_SHA" >/dev/null
+            else
+              echo "Lambda $fn does not exist yet; skipping."
+            fi
+          done
+        else
+          echo "LAMBDA_FUNCTION_NAMES unset; skipping Lambda rolls."
+        fi
+
+      - printf '{"appImage":"%s","lambdaImage":"%s","tag":"%s"}\n' "$ECR_URI_APP" "$ECR_URI_LAMBDA" "$SHORT_SHA" > imageDetail.json
 
 artifacts:
   files:

@@ -117,26 +117,34 @@ class PlatformStack(Stack):
         self.vpc.add_gateway_endpoint("S3Endpoint", service=ec2.GatewayVpcEndpointAwsService.S3)
 
         # ------------------------------------------------------------------
-        # ECR — single shared image repo (Runtime + Fargate + 7 Lambdas).
+        # ECR — TWO repos. Lambda requires public.ecr.aws/lambda/python:* as
+        # the base image; the agentcore image uses a slim base for smaller
+        # container size and faster Runtime/Fargate cold starts.
         # ------------------------------------------------------------------
-        self.image_repo = ecr.Repository(
-            self,
-            "AppRepo",
-            repository_name="aihedge-app",
-            image_tag_mutability=ecr.TagMutability.IMMUTABLE,
-            image_scan_on_push=True,
-            encryption=ecr.RepositoryEncryption.KMS,
-            encryption_key=self.cmk,
-            removal_policy=RemovalPolicy.DESTROY,
-            auto_delete_images=True,
-            lifecycle_rules=[
-                ecr.LifecycleRule(
-                    max_image_count=20,
-                    rule_priority=1,
-                    description="Keep last 20 images",
-                )
-            ],
-        )
+        def _repo(name: str, repo_id: str) -> ecr.Repository:
+            return ecr.Repository(
+                self,
+                repo_id,
+                repository_name=name,
+                image_tag_mutability=ecr.TagMutability.IMMUTABLE,
+                image_scan_on_push=True,
+                encryption=ecr.RepositoryEncryption.KMS,
+                encryption_key=self.cmk,
+                removal_policy=RemovalPolicy.DESTROY,
+                auto_delete_images=True,
+                lifecycle_rules=[
+                    ecr.LifecycleRule(
+                        max_image_count=20,
+                        rule_priority=1,
+                        description="Keep last 20 images",
+                    )
+                ],
+            )
+
+        # AgentCore Runtime + Fargate driver (built from Dockerfile.agentcore).
+        self.image_repo = _repo("aihedge-app", "AppRepo")
+        # All 7 Lambda targets (built from Dockerfile.lambda).
+        self.lambda_repo = _repo("aihedge-lambda", "LambdaRepo")
 
         # ------------------------------------------------------------------
         # S3 buckets — config (watchlist + per-run JSONs), CodePipeline artifacts.
@@ -209,6 +217,20 @@ class PlatformStack(Stack):
             tags=[cdk.CfnTag(key="UsedBy", value="AIHedge")],
         )
 
+        # Names of the Lambda functions the app_stack creates (stable, known
+        # at platform-stack synth time). buildspec rolls each by name after
+        # the Lambda image is pushed, because CloudFormation doesn't detect
+        # container-image moves on a tag — TauricResearch incident 2026-05-02.
+        lambda_function_names = ",".join([
+            "aihedge-data-tools",
+            "aihedge-memory-log",
+            "aihedge-get-config",
+            "aihedge-aggregate",
+            "aihedge-error-handler",
+            "aihedge-run-trigger",
+            "aihedge-run-status",
+        ])
+
         self.codebuild_project = codebuild.PipelineProject(
             self,
             "ImageBuild",
@@ -221,16 +243,26 @@ class PlatformStack(Stack):
             environment_variables={
                 "AWS_ACCOUNT_ID": codebuild.BuildEnvironmentVariable(value=self.account),
                 "AWS_REGION": codebuild.BuildEnvironmentVariable(value=self.region),
-                "ECR_REPOSITORY": codebuild.BuildEnvironmentVariable(value=self.image_repo.repository_name),
-                "ECR_URI": codebuild.BuildEnvironmentVariable(value=self.image_repo.repository_uri),
-                "IMAGE_SSM_URI": codebuild.BuildEnvironmentVariable(value="/aihedge/image/uri"),
-                "IMAGE_SSM_DIGEST": codebuild.BuildEnvironmentVariable(value="/aihedge/image/digest"),
-                "IMAGE_SSM_TAG": codebuild.BuildEnvironmentVariable(value="/aihedge/image/tag"),
+                # AgentCore + Fargate image
+                "ECR_REPOSITORY_APP": codebuild.BuildEnvironmentVariable(value=self.image_repo.repository_name),
+                "ECR_URI_APP": codebuild.BuildEnvironmentVariable(value=self.image_repo.repository_uri),
+                "IMAGE_SSM_APP_URI": codebuild.BuildEnvironmentVariable(value="/aihedge/image/app/uri"),
+                "IMAGE_SSM_APP_TAG": codebuild.BuildEnvironmentVariable(value="/aihedge/image/app/tag"),
+                "IMAGE_SSM_APP_DIGEST": codebuild.BuildEnvironmentVariable(value="/aihedge/image/app/digest"),
+                # Lambda image
+                "ECR_REPOSITORY_LAMBDA": codebuild.BuildEnvironmentVariable(value=self.lambda_repo.repository_name),
+                "ECR_URI_LAMBDA": codebuild.BuildEnvironmentVariable(value=self.lambda_repo.repository_uri),
+                "IMAGE_SSM_LAMBDA_URI": codebuild.BuildEnvironmentVariable(value="/aihedge/image/lambda/uri"),
+                "IMAGE_SSM_LAMBDA_TAG": codebuild.BuildEnvironmentVariable(value="/aihedge/image/lambda/tag"),
+                "IMAGE_SSM_LAMBDA_DIGEST": codebuild.BuildEnvironmentVariable(value="/aihedge/image/lambda/digest"),
+                # Comma-separated list of Lambdas to roll post-push
+                "LAMBDA_FUNCTION_NAMES": codebuild.BuildEnvironmentVariable(value=lambda_function_names),
             },
             build_spec=codebuild.BuildSpec.from_source_filename("buildspec.yml"),
             timeout=Duration.minutes(30),
         )
         self.image_repo.grant_pull_push(self.codebuild_project)
+        self.lambda_repo.grant_pull_push(self.codebuild_project)
         self.codebuild_project.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["ssm:PutParameter", "ssm:GetParameter", "ssm:AddTagsToResource"],
@@ -239,8 +271,7 @@ class PlatformStack(Stack):
                 ],
             )
         )
-        # Needed for the post_build step that rolls the AgentCore Runtime
-        # after every new image push (see buildspec.yml).
+        # Roll AgentCore Runtime on each push.
         self.codebuild_project.add_to_role_policy(
             iam.PolicyStatement(
                 actions=[
@@ -249,6 +280,16 @@ class PlatformStack(Stack):
                     "bedrock-agentcore-control:GetAgentRuntime",
                 ],
                 resources=["*"],
+            )
+        )
+        # Roll Lambda code on each push.
+        self.codebuild_project.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "lambda:UpdateFunctionCode",
+                    "lambda:GetFunction",
+                ],
+                resources=[f"arn:aws:lambda:{self.region}:{self.account}:function:aihedge-*"],
             )
         )
 
@@ -294,13 +335,18 @@ class PlatformStack(Stack):
         # with placeholders so app_stack can synth before the first build runs.
         # ------------------------------------------------------------------
         for name, initial in [
-            ("/aihedge/image/uri", self.image_repo.repository_uri),
-            ("/aihedge/image/tag", "placeholder"),
-            ("/aihedge/image/digest", "placeholder"),
+            ("/aihedge/image/app/uri", self.image_repo.repository_uri),
+            ("/aihedge/image/app/tag", "placeholder"),
+            ("/aihedge/image/app/digest", "placeholder"),
+            ("/aihedge/image/lambda/uri", self.lambda_repo.repository_uri),
+            ("/aihedge/image/lambda/tag", "placeholder"),
+            ("/aihedge/image/lambda/digest", "placeholder"),
         ]:
+            # Turn "/aihedge/image/app/tag" -> "ParamImageAppTag" for a unique construct ID.
+            construct_id = "Param" + "".join(p.title() for p in name.strip("/").split("/")[1:])
             ssm.StringParameter(
                 self,
-                f"Param{name.split('/')[-1].title()}",
+                construct_id,
                 parameter_name=name,
                 string_value=initial,
                 description="Set by CodeBuild post_build phase",
@@ -419,6 +465,7 @@ class PlatformStack(Stack):
         # Outputs consumed by app_stack.
         # ------------------------------------------------------------------
         CfnOutput(self, "ImageRepoUri", value=self.image_repo.repository_uri, export_name="AIHedgeImageRepoUri")
+        CfnOutput(self, "LambdaRepoUri", value=self.lambda_repo.repository_uri, export_name="AIHedgeLambdaRepoUri")
         CfnOutput(self, "ConfigBucketName", value=self.config_bucket.bucket_name, export_name="AIHedgeConfigBucket")
         CfnOutput(self, "VpcIdOut", value=self.vpc.vpc_id, export_name="AIHedgeVpcId")
         CfnOutput(self, "CodePipelineName", value=pipeline.pipeline_name, export_name="AIHedgeCodePipelineName")
