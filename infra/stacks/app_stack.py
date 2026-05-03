@@ -13,7 +13,7 @@ from pathlib import Path
 import aws_cdk as cdk
 from aws_cdk import CfnOutput, Duration, RemovalPolicy, Stack
 from aws_cdk import aws_apigatewayv2 as apigw
-from aws_cdk import aws_apigatewayv2_authorizers as apigw_authz  # noqa: F401
+from aws_cdk import aws_apigatewayv2_authorizers as apigw_authz
 from aws_cdk import aws_apigatewayv2_integrations as apigw_int
 from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_ec2 as ec2
@@ -55,8 +55,20 @@ class AppStack(Stack):
         agent_core_enabled = str(self.node.try_get_context("agentCoreEnabled")).lower() == "true"
         observability_enabled = str(self.node.try_get_context("observabilityEnabled")).lower() == "true"
 
+        # First-pass bootstrap: only the platform stack exists, no image in ECR
+        # yet, and the /aihedge/image/digest SSM parameter is still the
+        # placeholder string. Every container-image Lambda + Fargate task in
+        # this stack would reject that at synth. We short-circuit instead, so
+        # `cdk deploy AIHedge-App-Stack -c agentCoreEnabled=false` produces an
+        # empty stack. After CodePipeline pushes the first real image, redeploy
+        # with `-c agentCoreEnabled=true` to fill in Runtime/Lambdas/Step Fn.
+        if not agent_core_enabled:
+            self._emit_placeholder_output()
+            return
+
         email_to = self.node.try_get_context("aihedge:emailTo")
         md_store_prefix = self.node.try_get_context("aihedge:mdStorePrefix") or "AIHedge"
+        md_store_url = self.node.try_get_context("aihedge:mdStoreUrl") or ""
         models = self.node.try_get_context("aihedge:models") or {}
         assignments = self.node.try_get_context("aihedge:modelAssignments") or {}
 
@@ -172,9 +184,11 @@ class AppStack(Stack):
             "AIHEDGE_IN_CLUSTER": "1",
             "AIHEDGE_MD_STORE_SECRET_ID": platform.md_store_secret.secret_name,
             "AIHEDGE_MD_STORE_PREFIX": md_store_prefix,
+            "AIHEDGE_MD_STORE_URL": md_store_url,
             "AIHEDGE_MEMORY_TABLE": self.memory_table.table_name,
             "AIHEDGE_MODEL_MAP_JSON": json.dumps({k: models[v] for k, v in assignments.items() if v in models}),
-            "AIHEDGE_GATEWAY_URL": "",  # populated post-create; see below
+            # AIHEDGE_GATEWAY_URL / _REGION are injected by AgentRuntimeBundle
+            # after the Gateway is created — don't set them here.
             "AWS_DEFAULT_REGION": self.region,
         }
         if osis_endpoint_param:
@@ -292,6 +306,7 @@ class AppStack(Stack):
                 code=lambda_.Code.from_ecr_image(
                     repository=platform.image_repo,
                     tag_or_digest=image_digest,  # pin Lambdas by digest so new builds actually roll
+                    entrypoint=["python", "-m", "awslambdaric"],
                     cmd=[handler_path],
                 ),
                 handler=lambda_.Handler.FROM_IMAGE,
@@ -459,17 +474,18 @@ class AppStack(Stack):
             api_name="aihedge-web",
             description="IAM-auth entry points for AI-HedgeFund runs",
         )
+        iam_authorizer = apigw_authz.HttpIamAuthorizer()
         http_api.add_routes(
             path="/runs",
             methods=[apigw.HttpMethod.POST],
             integration=apigw_int.HttpLambdaIntegration("RunTriggerInt", run_trigger_fn),
-            authorizer=apigw.HttpIamAuthorizer(),
+            authorizer=iam_authorizer,
         )
         http_api.add_routes(
             path="/runs/{runId}",
             methods=[apigw.HttpMethod.GET],
             integration=apigw_int.HttpLambdaIntegration("RunStatusInt", run_status_fn),
-            authorizer=apigw.HttpIamAuthorizer(),
+            authorizer=iam_authorizer,
         )
 
         # ------------------------------------------------------------------
@@ -510,6 +526,14 @@ class AppStack(Stack):
         CfnOutput(self, "StateMachineArnOut", value=state_machine_arn)
         CfnOutput(self, "HttpApiUrl", value=http_api.api_endpoint)
         CfnOutput(self, "MemoryTableName", value=self.memory_table.table_name)
+
+    def _emit_placeholder_output(self) -> None:
+        """Produce a stand-in CFN output so the stack isn't empty on first pass."""
+        CfnOutput(
+            self,
+            "BootstrapStatus",
+            value="agentCoreEnabled=false — redeploy with -c agentCoreEnabled=true after CodePipeline produces the first image",
+        )
 
 
 def _data_tool_schemas() -> list[dict]:

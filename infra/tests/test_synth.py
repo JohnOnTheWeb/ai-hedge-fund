@@ -52,9 +52,9 @@ def test_synth_first_pass():
     platform_template = Template.from_stack(platform)
     app_template = Template.from_stack(app_stack)
 
-    # Platform must have the ECR repo, OpenSearch domain, OSIS pipeline when
-    # observabilityEnabled is default-off, ECR is always present.
+    # Platform must have the ECR repo (always present).
     platform_template.resource_count_is("AWS::ECR::Repository", 1)
 
-    # App stack always has at least the Step Functions state machine.
-    app_template.resource_count_is("AWS::StepFunctions::StateMachine", 1)
+    # First-pass app stack is empty (agentCoreEnabled default-false): no
+    # Step Functions, no Lambdas — just the bootstrap-status output.
+    app_template.resource_count_is("AWS::StepFunctions::StateMachine", 0)

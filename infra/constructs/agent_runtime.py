@@ -21,8 +21,14 @@ class LambdaTargetSpec:
     """One Lambda-backed MCP target registered on the gateway."""
 
     target_name: str          # e.g. "data-tools"
-    handler_cmd: list[str]    # container CMD override (awslambdaric + dotted path)
+    handler_cmd: list[str]    # container CMD — dotted handler path, e.g. ["deploy.app.lambdas.data_tools.handler.handler"]
     tool_schemas: list[dict]  # JSON schemas served as MCP tool catalog
+
+
+# awslambdaric is the AWS Lambda Runtime Interface Client — every
+# container-image Lambda runs it as ENTRYPOINT and passes the dotted handler
+# path as CMD. The image ships it via `pip install awslambdaric` (see Dockerfile).
+_LAMBDA_ENTRYPOINT = ["python", "-m", "awslambdaric"]
 
 
 class AgentRuntimeBundle(Construct):
@@ -48,29 +54,9 @@ class AgentRuntimeBundle(Construct):
         image_uri = f"{image_repo.repository_uri}:{image_tag}"
 
         # ------------------------------------------------------------------
-        # AgentCore Runtime — hosts FastAPI container with LangGraph pipeline.
-        # ------------------------------------------------------------------
-        self.runtime = CfnResource(
-            self,
-            "Runtime",
-            type="AWS::BedrockAgentCore::Runtime",
-            properties={
-                "AgentRuntimeName": "aihedge_runtime",
-                "RoleArn": runtime_role.role_arn,
-                "AgentRuntimeArtifact": {
-                    "ContainerConfiguration": {
-                        "ContainerUri": image_uri,
-                    },
-                },
-                "NetworkConfiguration": {"NetworkMode": "PUBLIC"},
-                "EnvironmentVariables": runtime_env,
-                "ProtocolConfiguration": {"ServerProtocol": "HTTP"},
-            },
-        )
-        self.runtime.apply_removal_policy(RemovalPolicy.DESTROY)
-
-        # ------------------------------------------------------------------
-        # AgentCore Gateway — single MCP endpoint, IAM-auth inbound.
+        # Gateway FIRST — so the Runtime env can reference its URL as a CFN
+        # token. The agents running inside the Runtime read AIHEDGE_GATEWAY_URL
+        # to route every tool call through the Gateway.
         # ------------------------------------------------------------------
         self.gateway = CfnResource(
             self,
@@ -88,6 +74,38 @@ class AgentRuntimeBundle(Construct):
         self.gateway_id = self.gateway.get_att("GatewayIdentifier").to_string()
         self.gateway_url = self.gateway.get_att("GatewayUrl").to_string()
 
+        # Build the final env for the Runtime: whatever the caller passed PLUS
+        # the Gateway URL + region. Any empty/placeholder AIHEDGE_GATEWAY_URL
+        # the caller provided is overwritten.
+        runtime_env_final = {
+            **{k: v for k, v in (runtime_env or {}).items() if k not in ("AIHEDGE_GATEWAY_URL", "AIHEDGE_GATEWAY_REGION")},
+            "AIHEDGE_GATEWAY_URL": self.gateway_url,
+            "AIHEDGE_GATEWAY_REGION": stack.region,
+        }
+
+        # ------------------------------------------------------------------
+        # AgentCore Runtime — hosts FastAPI container with LangGraph pipeline.
+        # ------------------------------------------------------------------
+        self.runtime = CfnResource(
+            self,
+            "Runtime",
+            type="AWS::BedrockAgentCore::Runtime",
+            properties={
+                "AgentRuntimeName": "aihedge_runtime",
+                "RoleArn": runtime_role.role_arn,
+                "AgentRuntimeArtifact": {
+                    "ContainerConfiguration": {
+                        "ContainerUri": image_uri,
+                    },
+                },
+                "NetworkConfiguration": {"NetworkMode": "PUBLIC"},
+                "EnvironmentVariables": runtime_env_final,
+                "ProtocolConfiguration": {"ServerProtocol": "HTTP"},
+            },
+        )
+        self.runtime.apply_removal_policy(RemovalPolicy.DESTROY)
+        self.runtime.add_dependency(self.gateway)
+
         self.target_functions: dict[str, lambda_.Function] = {}
 
         for spec, role in lambda_targets:
@@ -98,6 +116,7 @@ class AgentRuntimeBundle(Construct):
                 code=lambda_.Code.from_ecr_image(
                     repository=image_repo,
                     tag_or_digest=image_digest,  # digest so new builds trigger CFN update
+                    entrypoint=_LAMBDA_ENTRYPOINT,
                     cmd=spec.handler_cmd,
                 ),
                 handler=lambda_.Handler.FROM_IMAGE,

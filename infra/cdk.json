@@ -25,6 +25,7 @@
     "aihedge:repoBranch": "main",
     "aihedge:emailTo": "jotw@amazon.com",
     "aihedge:mdStorePrefix": "AIHedge",
+    "aihedge:mdStoreUrl": "https://mdstore.internal/files",
     "aihedge:logRetentionDays": 7,
     "aihedge:models": {
       "deep": "anthropic.claude-opus-4-7-20251015-v1:0",

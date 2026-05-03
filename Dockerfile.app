@@ -54,7 +54,11 @@ RUN chmod a+rx /usr/local/bin/python* 2>/dev/null || true
 # AgentCore Runtime expects port 8080; default CMD runs the FastAPI app.
 EXPOSE 8080
 
-# Lambda entrypoint wraps the awslambdaric; callers override CMD with the
-# dotted handler path (e.g. deploy.app.lambdas.data_tools.handler.handler).
-ENTRYPOINT ["python", "-m"]
-CMD ["uvicorn", "deploy.app.runtime:app", "--host", "0.0.0.0", "--port", "8080"]
+# ENTRYPOINT is intentionally empty. Each consumer sets its own:
+#   AgentCore Runtime: default CMD below (uvicorn)
+#   Fargate driver:    command=["python","-m","deploy.app.task_runner"]
+#   Lambda handlers:   entry_point=["python","-m","awslambdaric"] + cmd=["<module>.handler"]
+# Previously had `ENTRYPOINT ["python","-m"]` which prepended to every CMD;
+# that works for the uvicorn default but breaks every Lambda/Fargate consumer.
+ENTRYPOINT []
+CMD ["python", "-m", "uvicorn", "deploy.app.runtime:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -20,11 +20,28 @@ python scripts/seed_secrets.py --profile "$PROFILE" --region "$REGION"
 # --- Phase 0b — cdk bootstrap ---
 (cd infra && cdk bootstrap "aws://$ACCOUNT/$REGION" --profile "$PROFILE")
 
-# --- Phase 1 — platform + app (no Runtime yet) ---
-(cd infra && cdk deploy AIHedge-Platform-Stack AIHedge-App-Stack \
-    -c agentCoreEnabled=false \
+# --- Phase 1 — platform only (creates ECR, CodePipeline, Gateway shell) ---
+(cd infra && cdk deploy AIHedge-Platform-Stack \
     --require-approval never \
     --profile "$PROFILE")
+
+echo ""
+echo ">>> MANUAL STEP REQUIRED: accept the GitHub connection"
+echo "    1. Open https://console.aws.amazon.com/codesuite/settings/connections?region=$REGION"
+echo "    2. Find 'aihedge-github', status should be PENDING"
+echo "    3. Click 'Update pending connection' → authorize via GitHub OAuth"
+echo "    Press ENTER when done..."
+read -r _
+
+echo ""
+echo ">>> MANUAL STEP REQUIRED: request Bedrock model access"
+echo "    1. Open https://console.aws.amazon.com/bedrock/home?region=$REGION#/modelaccess"
+echo "    2. Request access to:"
+echo "         anthropic.claude-opus-4-7-20251015-v1:0"
+echo "         anthropic.claude-sonnet-4-5-20250929-v1:0"
+echo "         anthropic.claude-haiku-4-5-20251001"
+echo "    Press ENTER when all three show Access granted..."
+read -r _
 
 # --- Phase 2 — build the image ---
 echo ">>> Starting CodePipeline execution"
