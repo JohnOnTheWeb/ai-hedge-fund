@@ -43,6 +43,7 @@ class AgentRuntimeBundle(Construct):
         image_tag: str,
         image_digest: str,
         lambda_repo: ecr.IRepository,
+        lambda_tag: str,
         lambda_digest: str,
         runtime_role: iam.IRole,
         gateway_role: iam.IRole,
@@ -102,11 +103,19 @@ class AgentRuntimeBundle(Construct):
                 },
                 "NetworkConfiguration": {"NetworkMode": "PUBLIC"},
                 "EnvironmentVariables": runtime_env_final,
-                "ProtocolConfiguration": {"ServerProtocol": "HTTP"},
+                "ProtocolConfiguration": "HTTP",
             },
         )
         self.runtime.apply_removal_policy(RemovalPolicy.DESTROY)
         self.runtime.add_dependency(self.gateway)
+        # AgentCore Runtime validates ECR pull permissions at create time; CFN
+        # otherwise creates the Runtime before the role's inline default policy
+        # attaches, causing "Access denied while validating ECR URI".
+        runtime_default_policy = runtime_role.node.try_find_child("DefaultPolicy")
+        if runtime_default_policy is not None:
+            cfn_policy = runtime_default_policy.node.default_child
+            if cfn_policy is not None:
+                self.runtime.add_dependency(cfn_policy)
 
         self.target_functions: dict[str, lambda_.Function] = {}
 
@@ -121,7 +130,7 @@ class AgentRuntimeBundle(Construct):
                 # regardless of chmod (TauricResearch 2026-05-02).
                 code=lambda_.Code.from_ecr_image(
                     repository=lambda_repo,
-                    tag_or_digest=lambda_digest,
+                    tag_or_digest=lambda_tag,
                     cmd=spec.handler_cmd,
                 ),
                 handler=lambda_.Handler.FROM_IMAGE,

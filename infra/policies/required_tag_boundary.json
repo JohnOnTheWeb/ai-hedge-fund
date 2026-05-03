@@ -2,6 +2,12 @@
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "AllowAll",
+      "Effect": "Allow",
+      "Action": "*",
+      "Resource": "*"
+    },
+    {
       "Sid": "DenyCreateWithoutUsedByTag",
       "Effect": "Deny",
       "Action": [
@@ -23,7 +29,6 @@
         "sns:CreateTopic",
         "sqs:CreateQueue",
         "states:CreateStateMachine",
-        "events:PutRule",
         "scheduler:CreateSchedule",
         "apigateway:POST",
         "secretsmanager:CreateSecret",

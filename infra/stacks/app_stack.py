@@ -111,10 +111,17 @@ class AppStack(Stack):
         # ------------------------------------------------------------------
         # IAM roles — one per execution context.
         # ------------------------------------------------------------------
+        agentcore_trust = iam.ServicePrincipal(
+            "bedrock-agentcore.amazonaws.com",
+            conditions={
+                "StringEquals": {"aws:SourceAccount": self.account},
+                "ArnLike": {"aws:SourceArn": f"arn:aws:bedrock-agentcore:{self.region}:{self.account}:*"},
+            },
+        )
         runtime_role = iam.Role(
             self,
             "RuntimeExecRole",
-            assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+            assumed_by=agentcore_trust,
             permissions_boundary=platform.permission_boundary,
             description="AgentCore Runtime execution role",
         )
@@ -145,20 +152,36 @@ class AppStack(Stack):
                 resources=[platform.md_store_secret.secret_arn],
             )
         )
+        # ECR pull permissions. GetAuthorizationToken must be on "*" (it's a
+        # non-resource-level action); the others are scoped to the AgentCore
+        # image repo.
+        runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["ecr:GetAuthorizationToken"],
+                resources=["*"],
+            )
+        )
         runtime_role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
                     "ecr:BatchCheckLayerAvailability",
                     "ecr:GetDownloadUrlForLayer",
                     "ecr:BatchGetImage",
-                    "ecr:GetAuthorizationToken",
                 ],
-                resources=[platform.image_repo.repository_arn, "*"],
+                resources=[platform.image_repo.repository_arn],
+            )
+        )
+        # ECR repos are KMS-encrypted with the platform CMK; Runtime must be
+        # able to decrypt the image layers during pull validation.
+        runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["kms:Decrypt", "kms:DescribeKey"],
+                resources=[platform.cmk.key_arn],
             )
         )
         runtime_role.add_to_policy(
             iam.PolicyStatement(
-                actions=["logs:CreateLogStream", "logs:PutLogEvents"],
+                actions=["logs:CreateLogStream", "logs:PutLogEvents", "logs:CreateLogGroup"],
                 resources=[f"arn:aws:logs:{self.region}:{self.account}:log-group:/aws/bedrock-agentcore/*"],
             )
         )
@@ -166,9 +189,15 @@ class AppStack(Stack):
         gateway_role = iam.Role(
             self,
             "GatewayRole",
-            assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+            assumed_by=iam.ServicePrincipal(
+                "bedrock-agentcore.amazonaws.com",
+                conditions={
+                    "StringEquals": {"aws:SourceAccount": self.account},
+                    "ArnLike": {"aws:SourceArn": f"arn:aws:bedrock-agentcore:{self.region}:{self.account}:*"},
+                },
+            ),
             permissions_boundary=platform.permission_boundary,
-            description="AgentCore Gateway role — invokes target Lambdas",
+            description="AgentCore Gateway role - invokes target Lambdas",
         )
 
         lambda_data_role = iam.Role(
@@ -255,6 +284,7 @@ class AppStack(Stack):
                 image_digest=image_digest,
                 # Lambda target image (public.ecr.aws/lambda/python, Dockerfile.lambda)
                 lambda_repo=platform.lambda_repo,
+                lambda_tag=lambda_tag,
                 lambda_digest=lambda_digest,
                 runtime_role=runtime_role,
                 gateway_role=gateway_role,
@@ -355,7 +385,7 @@ class AppStack(Stack):
                 runtime=lambda_.Runtime.FROM_IMAGE,
                 code=lambda_.Code.from_ecr_image(
                     repository=platform.lambda_repo,
-                    tag_or_digest=lambda_digest,
+                    tag_or_digest=lambda_tag,
                     cmd=[handler_path],
                 ),
                 handler=lambda_.Handler.FROM_IMAGE,
@@ -484,7 +514,10 @@ class AppStack(Stack):
             tags=[sfn.CfnStateMachine.TagsEntryProperty(key="UsedBy", value="AIHedge")],
         )
 
-        # State Machine perms
+        # State Machine perms (grant_invoke + explicit statements below). The
+        # StateMachine CFN resource must wait for these to attach; otherwise
+        # SFN tries to set up its managed EventBridge rule before the role has
+        # events:PutTargets.
         get_config_fn.grant_invoke(state_machine_role)
         aggregate_fn.grant_invoke(state_machine_role)
         error_fn.grant_invoke(state_machine_role)
@@ -501,10 +534,29 @@ class AppStack(Stack):
                 resources=[task_role.role_arn, task_def.execution_role.role_arn if task_def.execution_role else "*"],
             )
         )
+        # Step Functions' ECS .sync integration manages an EventBridge rule to
+        # receive task state-change events. It needs events:* on the managed
+        # rule namespace (StepFunctionsGetEventsForECSTaskRule) at state-machine
+        # CREATE time, not just run time.
+        # Step Functions' ECS .sync integration internally creates an
+        # EventBridge managed rule to listen for ECS task state changes.
+        # The exact ARN + service path SFN uses is opaque, so grant events:*
+        # on all rules/targets in this account and allow the SFN service to
+        # create its service-linked role.
         state_machine_role.add_to_policy(
             iam.PolicyStatement(
-                actions=["events:PutTargets", "events:PutRule", "events:DescribeRule"],
-                resources=[f"arn:aws:events:{self.region}:{self.account}:rule/StepFunctionsGetEventsForECSTaskRule"],
+                actions=["events:*"],
+                resources=[
+                    f"arn:aws:events:{self.region}:{self.account}:rule/*",
+                    f"arn:aws:events:{self.region}:{self.account}:event-bus/default",
+                ],
+            )
+        )
+        state_machine_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["iam:CreateServiceLinkedRole"],
+                resources=["*"],
+                conditions={"StringEquals": {"iam:AWSServiceName": "events.amazonaws.com"}},
             )
         )
         state_machine_role.add_to_policy(
@@ -513,6 +565,42 @@ class AppStack(Stack):
                 resources=[self.summary_topic.topic_arn],
             )
         )
+        # SFN logging + X-Ray tracing. Must be on "*" — the log-delivery
+        # service checks these without a scoped resource.
+        state_machine_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "logs:CreateLogDelivery",
+                    "logs:GetLogDelivery",
+                    "logs:UpdateLogDelivery",
+                    "logs:DeleteLogDelivery",
+                    "logs:ListLogDeliveries",
+                    "logs:PutResourcePolicy",
+                    "logs:DescribeResourcePolicies",
+                    "logs:DescribeLogGroups",
+                ],
+                resources=["*"],
+            )
+        )
+        state_machine_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "xray:PutTraceSegments",
+                    "xray:PutTelemetryRecords",
+                    "xray:GetSamplingRules",
+                    "xray:GetSamplingTargets",
+                ],
+                resources=["*"],
+            )
+        )
+
+        # Force CFN to attach the state-machine role's inline policy BEFORE it
+        # creates the state machine itself. SFN runs authorization checks during
+        # create (e.g. for the ECS .sync managed EventBridge rule) that fail if
+        # the policy lags the role by even a few milliseconds.
+        sm_default_policy = state_machine_role.node.try_find_child("DefaultPolicy")
+        if sm_default_policy is not None and sm_default_policy.node.default_child is not None:
+            state_machine.add_dependency(sm_default_policy.node.default_child)
 
         state_machine_arn = f"arn:{self.partition}:states:{self.region}:{self.account}:stateMachine:AIHedge-Run"
         run_trigger_fn.add_environment("AIHEDGE_STATE_MACHINE_ARN", state_machine_arn)
@@ -597,16 +685,51 @@ class AppStack(Stack):
         )
 
 
+# AgentCore Gateway's SchemaDefinition supports a narrow subset of JSON Schema.
+# Only these keys are allowed; everything else (enum, default, minimum, maximum,
+# anyOf, oneOf, etc.) must be dropped. Keys are also PascalCase, not lowercase.
+_SCHEMA_KEY_MAP = {
+    "type": "Type",
+    "properties": "Properties",
+    "required": "Required",
+    "items": "Items",
+    "description": "Description",
+}
+
+
+def _pascalize_schema(obj: dict) -> dict:
+    """Rewrite a JSON-Schema object to AgentCore Gateway's SchemaDefinition shape.
+
+    - PascalCases allowed keys (type→Type, properties→Properties, etc.).
+    - Drops unsupported keys (enum, default, minimum, maximum, format, ...).
+    - Preserves property *names* under Properties (they're arbitrary, not schema
+      keywords); their values are recursively pascalized SchemaDefinitions.
+    - Items is a single SchemaDefinition (recursed).
+    """
+    out: dict = {}
+    for k, v in obj.items():
+        new_key = _SCHEMA_KEY_MAP.get(k)
+        if new_key is None:
+            continue
+        if new_key == "Properties" and isinstance(v, dict):
+            out["Properties"] = {name: _pascalize_schema(sub) for name, sub in v.items()}
+        elif new_key == "Items" and isinstance(v, dict):
+            out["Items"] = _pascalize_schema(v)
+        else:
+            out[new_key] = v
+    return out
+
+
 def _data_tool_schemas() -> list[dict]:
     """MCP tool schemas served by the data-tools Lambda target."""
     ticker_prop = {"type": "string", "description": "Stock ticker (e.g. AAPL)"}
     end_date_prop = {"type": "string", "description": "ISO date (YYYY-MM-DD)"}
 
-    return [
+    _raw = [
         {
-            "name": "get_prices",
-            "description": "Return OHLCV prices for the ticker between start_date and end_date.",
-            "inputSchema": {
+            "Name": "get_prices",
+            "Description": "Return OHLCV prices for the ticker between start_date and end_date.",
+            "InputSchema": {
                 "type": "object",
                 "properties": {
                     "ticker": ticker_prop,
@@ -617,9 +740,9 @@ def _data_tool_schemas() -> list[dict]:
             },
         },
         {
-            "name": "get_financial_metrics",
-            "description": "Return financial metrics (ratios, margins, growth) for the ticker.",
-            "inputSchema": {
+            "Name": "get_financial_metrics",
+            "Description": "Return financial metrics (ratios, margins, growth) for the ticker.",
+            "InputSchema": {
                 "type": "object",
                 "properties": {
                     "ticker": ticker_prop,
@@ -631,9 +754,9 @@ def _data_tool_schemas() -> list[dict]:
             },
         },
         {
-            "name": "search_line_items",
-            "description": "Return specific line items from the financial statements.",
-            "inputSchema": {
+            "Name": "search_line_items",
+            "Description": "Return specific line items from the financial statements.",
+            "InputSchema": {
                 "type": "object",
                 "properties": {
                     "ticker": ticker_prop,
@@ -646,18 +769,18 @@ def _data_tool_schemas() -> list[dict]:
             },
         },
         {
-            "name": "get_market_cap",
-            "description": "Return the market cap for the ticker as of end_date.",
-            "inputSchema": {
+            "Name": "get_market_cap",
+            "Description": "Return the market cap for the ticker as of end_date.",
+            "InputSchema": {
                 "type": "object",
                 "properties": {"ticker": ticker_prop, "end_date": end_date_prop},
                 "required": ["ticker", "end_date"],
             },
         },
         {
-            "name": "get_company_news",
-            "description": "Return news headlines for the ticker ending on end_date.",
-            "inputSchema": {
+            "Name": "get_company_news",
+            "Description": "Return news headlines for the ticker ending on end_date.",
+            "InputSchema": {
                 "type": "object",
                 "properties": {
                     "ticker": ticker_prop,
@@ -668,9 +791,9 @@ def _data_tool_schemas() -> list[dict]:
             },
         },
         {
-            "name": "get_insider_trades",
-            "description": "Return insider trading records for the ticker.",
-            "inputSchema": {
+            "Name": "get_insider_trades",
+            "Description": "Return insider trading records for the ticker.",
+            "InputSchema": {
                 "type": "object",
                 "properties": {
                     "ticker": ticker_prop,
@@ -681,15 +804,18 @@ def _data_tool_schemas() -> list[dict]:
             },
         },
     ]
+    for tool in _raw:
+        tool["InputSchema"] = _pascalize_schema(tool["InputSchema"])
+    return _raw
 
 
 def _memory_tool_schemas() -> list[dict]:
     """MCP tool schemas served by the memory-log Lambda target."""
-    return [
+    _raw = [
         {
-            "name": "get_past_context",
-            "description": "Return recent same-ticker decisions plus cross-ticker reflections.",
-            "inputSchema": {
+            "Name": "get_past_context",
+            "Description": "Return recent same-ticker decisions plus cross-ticker reflections.",
+            "InputSchema": {
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string"},
@@ -700,9 +826,9 @@ def _memory_tool_schemas() -> list[dict]:
             },
         },
         {
-            "name": "store_decision",
-            "description": "Persist a portfolio manager decision.",
-            "inputSchema": {
+            "Name": "store_decision",
+            "Description": "Persist a portfolio manager decision.",
+            "InputSchema": {
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string"},
@@ -717,9 +843,9 @@ def _memory_tool_schemas() -> list[dict]:
             },
         },
         {
-            "name": "get_pending_entries",
-            "description": "Return decisions with pending=true older than N days.",
-            "inputSchema": {
+            "Name": "get_pending_entries",
+            "Description": "Return decisions with pending=true older than N days.",
+            "InputSchema": {
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string"},
@@ -729,9 +855,9 @@ def _memory_tool_schemas() -> list[dict]:
             },
         },
         {
-            "name": "update_realized_returns",
-            "description": "Fill in realized_return_raw / realized_return_vs_spy for a prior decision.",
-            "inputSchema": {
+            "Name": "update_realized_returns",
+            "Description": "Fill in realized_return_raw / realized_return_vs_spy for a prior decision.",
+            "InputSchema": {
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string"},
@@ -743,3 +869,6 @@ def _memory_tool_schemas() -> list[dict]:
             },
         },
     ]
+    for tool in _raw:
+        tool["InputSchema"] = _pascalize_schema(tool["InputSchema"])
+    return _raw
