@@ -132,7 +132,7 @@ def _run_graph(payload: dict[str, Any], current_node: dict[str, str]) -> dict[st
             },
             "metadata": {
                 "show_reasoning": show_reasoning,
-                "model_name": payload.get("model_name", "claude-sonnet-4-5-20250929-v1:0"),
+                "model_name": payload.get("model_name", "us.anthropic.claude-sonnet-4-5-20250929-v1:0"),
                 "model_provider": payload.get("model_provider", "Bedrock"),
                 "run_id": run_id,
             },
