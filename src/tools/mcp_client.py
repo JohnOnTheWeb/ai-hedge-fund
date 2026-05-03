@@ -37,21 +37,26 @@ def call_tool(target: str, tool: str, arguments: dict[str, Any]) -> Any:
     Lazy-imports boto3 + botocore auth so local CLI users without these
     packages aren't affected.
     """
+    # AgentCore Gateway speaks JSON-RPC 2.0 at the /mcp endpoint. The
+    # GatewayUrl attribute already ends in "/mcp"; don't append further.
     endpoint = os.environ["AIHEDGE_GATEWAY_URL"].rstrip("/")
-    # AgentCore's GatewayUrl attribute already ends with "/mcp" — don't
-    # double it when constructing the tools/call endpoint.
-    if endpoint.endswith("/mcp"):
-        endpoint = endpoint[: -len("/mcp")]
+    if not endpoint.endswith("/mcp"):
+        endpoint = f"{endpoint}/mcp"
     region = os.environ.get("AIHEDGE_GATEWAY_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
     namespaced = f"{target}___{tool}"
-    body = json.dumps({"name": namespaced, "arguments": arguments}).encode("utf-8")
+    body = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": namespaced, "arguments": arguments},
+    }).encode("utf-8")
 
-    signed_headers, signed_body = _sigv4_sign("POST", f"{endpoint}/mcp/tools/call", body, region)
+    signed_headers, signed_body = _sigv4_sign("POST", endpoint, body, region)
     headers = {"Content-Type": "application/json", **signed_headers}
 
     import requests
 
-    resp = requests.post(f"{endpoint}/mcp/tools/call", headers=headers, data=signed_body, timeout=60)
+    resp = requests.post(endpoint, headers=headers, data=signed_body, timeout=60)
     resp.raise_for_status()
     parsed = resp.json()
     return _unwrap(parsed)
