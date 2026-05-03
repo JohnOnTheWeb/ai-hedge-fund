@@ -407,3 +407,31 @@ def prices_to_df(prices: list[Price]) -> pd.DataFrame:
 def get_price_data(ticker: str, start_date: str, end_date: str, api_key: str = None) -> pd.DataFrame:
     prices = get_prices(ticker, start_date, end_date, api_key=api_key)
     return prices_to_df(prices)
+
+
+# --- Options / vol-regime tools (options-tools Gateway target) ---
+
+def get_historical_vol(ticker: str, windows: list[int] | None = None) -> dict:
+    """Annualized realized volatility for given day windows (default 30/60/90)."""
+    if _gw_on():
+        args = {"ticker": ticker}
+        if windows:
+            args["windows"] = windows
+        return _gw_call("options-tools", "get_historical_vol", args) or {}
+    return {}
+
+
+def get_earnings_context(ticker: str) -> dict:
+    """Next earnings date + trailing/forward EPS + earnings surprise history."""
+    if _gw_on():
+        return _gw_call("options-tools", "get_earnings_context", {"ticker": ticker}) or {}
+    return {}
+
+
+def get_options_chain(ticker: str, dte_target: int = 30, strikes_width: int = 10) -> dict:
+    """ATM options chain at the expiration closest to dte_target."""
+    if _gw_on():
+        return _gw_call("options-tools", "get_options_chain", {
+            "ticker": ticker, "dte_target": dte_target, "strikes_width": strikes_width,
+        }) or {}
+    return {}

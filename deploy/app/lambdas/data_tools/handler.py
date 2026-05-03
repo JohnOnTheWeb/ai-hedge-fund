@@ -22,6 +22,41 @@ import boto3
 
 from deploy.app.lambdas.data_tools import vendor
 
+# yfinance fallback is imported lazily on first use (import is ~1s cold).
+_yf_vendor = None
+
+
+def _yfinance():
+    global _yf_vendor
+    if _yf_vendor is None:
+        from deploy.app.lambdas.data_tools import yfinance_vendor as _mod
+        _yf_vendor = _mod
+    return _yf_vendor
+
+
+def _route(primary_call, fallback_call, *, tool: str):
+    """Run FD first; on any exception or empty list, run yfinance.
+
+    Mirrors TauricResearch's route_to_vendor: agents see one stable tool
+    contract regardless of which vendor answered. Fallback triggers on
+    exceptions OR empty results (FD returns 200 + empty list when a key
+    plan can't access that ticker).
+    """
+    import logging
+    log = logging.getLogger("data_tools.router")
+    try:
+        result = primary_call()
+        if result:
+            return result
+        log.warning("%s: primary (FD) returned empty; falling back to yfinance", tool)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("%s: primary (FD) raised %s: %s; falling back to yfinance", tool, type(exc).__name__, exc)
+    try:
+        return fallback_call()
+    except Exception as exc:  # noqa: BLE001
+        log.error("%s: fallback (yfinance) also failed: %s: %s", tool, type(exc).__name__, exc)
+        return []
+
 _GATEWAY_URL_ENV = "AIHEDGE_GATEWAY_URL"
 assert not os.environ.get(_GATEWAY_URL_ENV), (
     f"{_GATEWAY_URL_ENV} must NOT be set on the data-tools Lambda; that would "
@@ -75,39 +110,43 @@ def handler(event, context):
     api_key = _api_key()
 
     if tool_name == "get_prices":
-        data = vendor.get_prices(args["ticker"], args["start_date"], args["end_date"], api_key)
+        data = _route(
+            lambda: vendor.get_prices(args["ticker"], args["start_date"], args["end_date"], api_key),
+            lambda: _yfinance().get_prices(args["ticker"], args["start_date"], args["end_date"]),
+            tool=tool_name,
+        )
     elif tool_name == "get_financial_metrics":
-        data = vendor.get_financial_metrics(
-            args["ticker"],
-            args["end_date"],
-            period=args.get("period", "ttm"),
-            limit=int(args.get("limit", 10)),
-            api_key=api_key,
+        period = args.get("period", "ttm")
+        limit = int(args.get("limit", 10))
+        data = _route(
+            lambda: vendor.get_financial_metrics(args["ticker"], args["end_date"], period=period, limit=limit, api_key=api_key),
+            lambda: _yfinance().get_financial_metrics(args["ticker"], args["end_date"], period=period, limit=limit),
+            tool=tool_name,
         )
     elif tool_name == "search_line_items":
-        data = vendor.search_line_items(
-            args["ticker"],
-            args["line_items"],
-            args["end_date"],
-            period=args.get("period", "ttm"),
-            limit=int(args.get("limit", 10)),
-            api_key=api_key,
+        period = args.get("period", "ttm")
+        limit = int(args.get("limit", 10))
+        data = _route(
+            lambda: vendor.search_line_items(args["ticker"], args["line_items"], args["end_date"], period=period, limit=limit, api_key=api_key),
+            lambda: _yfinance().search_line_items(args["ticker"], args["line_items"], args["end_date"], period=period, limit=limit),
+            tool=tool_name,
         )
     elif tool_name == "get_market_cap":
-        data = vendor.get_market_cap(args["ticker"], args["end_date"], api_key)
+        primary_val = vendor.get_market_cap(args["ticker"], args["end_date"], api_key)
+        data = primary_val if primary_val is not None else _yfinance().get_market_cap(args["ticker"], args["end_date"])
     elif tool_name == "get_company_news":
-        data = vendor.get_company_news(
-            args["ticker"],
-            args["end_date"],
-            limit=int(args.get("limit", 50)),
-            api_key=api_key,
+        limit = int(args.get("limit", 50))
+        data = _route(
+            lambda: vendor.get_company_news(args["ticker"], args["end_date"], limit=limit, api_key=api_key),
+            lambda: _yfinance().get_company_news(args["ticker"], args["end_date"], limit=limit),
+            tool=tool_name,
         )
     elif tool_name == "get_insider_trades":
-        data = vendor.get_insider_trades(
-            args["ticker"],
-            args["end_date"],
-            limit=int(args.get("limit", 50)),
-            api_key=api_key,
+        limit = int(args.get("limit", 50))
+        data = _route(
+            lambda: vendor.get_insider_trades(args["ticker"], args["end_date"], limit=limit, api_key=api_key),
+            lambda: _yfinance().get_insider_trades(args["ticker"], args["end_date"], limit=limit),
+            tool=tool_name,
         )
     else:
         return {"error": f"unknown tool: {tool_name}"}

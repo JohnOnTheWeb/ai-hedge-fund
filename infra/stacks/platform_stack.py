@@ -208,6 +208,7 @@ class PlatformStack(Stack):
         lambda_function_names = ",".join([
             "aihedge-data-tools",
             "aihedge-memory-log",
+            "aihedge-options-tools",
             "aihedge-get-config",
             "aihedge-aggregate",
             "aihedge-error-handler",

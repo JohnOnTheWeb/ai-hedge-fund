@@ -11,7 +11,9 @@ import pandas as pd
 
 from src.tools.api import (
     get_company_news,
+    get_earnings_context,
     get_financial_metrics,
+    get_historical_vol,
     get_insider_trades,
     get_market_cap,
     get_prices,
@@ -81,6 +83,19 @@ def nassim_taleb_agent(state: AgentState, agent_id: str = "nassim_taleb_agent"):
         progress.update_status(agent_id, ticker, "Getting market cap")
         market_cap = get_market_cap(ticker, end_date, api_key=api_key)
 
+        # Options-tools signals (realized-vol regime + earnings calendar).
+        # Best-effort: empty dict if Gateway/options-tools unavailable.
+        progress.update_status(agent_id, ticker, "Fetching realized-vol regime")
+        try:
+            realized_vol = get_historical_vol(ticker, windows=[30, 60, 90])
+        except Exception:
+            realized_vol = {}
+        progress.update_status(agent_id, ticker, "Fetching earnings context")
+        try:
+            earnings_ctx = get_earnings_context(ticker)
+        except Exception:
+            earnings_ctx = {}
+
         # Run sub-analyses
         progress.update_status(agent_id, ticker, "Analyzing tail risk")
         tail_risk_analysis = analyze_tail_risk(prices_df)
@@ -135,6 +150,8 @@ def nassim_taleb_agent(state: AgentState, agent_id: str = "nassim_taleb_agent"):
             "volatility_regime_analysis": volatility_regime_analysis,
             "black_swan_analysis": black_swan_analysis,
             "market_cap": market_cap,
+            "realized_vol": realized_vol,
+            "earnings_context": earnings_ctx,
         }
 
         progress.update_status(agent_id, ticker, "Generating Nassim Taleb analysis")
@@ -699,6 +716,8 @@ def generate_taleb_output(
         "volatility_regime": analysis_data.get("volatility_regime_analysis", {}).get("details"),
         "black_swan": analysis_data.get("black_swan_analysis", {}).get("details"),
         "market_cap": analysis_data.get("market_cap"),
+        "realized_vol": analysis_data.get("realized_vol"),
+        "earnings_context": analysis_data.get("earnings_context"),
     }
 
     template = ChatPromptTemplate.from_messages(

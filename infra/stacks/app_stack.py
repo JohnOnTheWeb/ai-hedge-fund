@@ -288,6 +288,12 @@ class AppStack(Stack):
             handler_cmd=["deploy.app.lambdas.data_tools.handler.handler"],
             tool_schemas=_data_tool_schemas(),
         )
+        options_tools_spec = LambdaTargetSpec(
+            target_name="options-tools",
+            function_name="aihedge-options-tools",
+            handler_cmd=["deploy.app.lambdas.options_tools.handler.handler"],
+            tool_schemas=_options_tool_schemas(),
+        )
         memory_log_spec = LambdaTargetSpec(
             target_name="memory-log",
             function_name="aihedge-memory-log",
@@ -312,6 +318,7 @@ class AppStack(Stack):
                 gateway_role=gateway_role,
                 lambda_targets=[
                     (data_tools_spec, lambda_data_role),
+                    (options_tools_spec, lambda_data_role),
                     (memory_log_spec, lambda_memory_role),
                 ],
                 runtime_env=runtime_env,
@@ -895,6 +902,53 @@ def _memory_tool_schemas() -> list[dict]:
                     "realized_return_vs_spy": {"type": "number"},
                 },
                 "required": ["ticker", "trade_date_run", "realized_return_raw", "realized_return_vs_spy"],
+            },
+        },
+    ]
+    for tool in _raw:
+        tool["InputSchema"] = _pascalize_schema(tool["InputSchema"])
+    return _raw
+
+
+def _options_tool_schemas() -> list[dict]:
+    """MCP tool schemas served by the options-tools Lambda target (yfinance-backed).
+
+    Adapted from the TauricResearch brokerage_mcp tool set — tail-risk,
+    earnings-calendar, and ATM options-chain signals.
+    """
+    _raw = [
+        {
+            "Name": "get_historical_vol",
+            "Description": "Annualized realized volatility for the given day windows (default 30/60/90).",
+            "InputSchema": {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string", "description": "Stock ticker"},
+                    "windows": {"type": "array", "items": {"type": "integer"}},
+                },
+                "required": ["ticker"],
+            },
+        },
+        {
+            "Name": "get_earnings_context",
+            "Description": "Next earnings date, trailing/forward EPS, and recent earnings-surprise history.",
+            "InputSchema": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}},
+                "required": ["ticker"],
+            },
+        },
+        {
+            "Name": "get_options_chain",
+            "Description": "ATM options chain at the expiration closest to dte_target (default 30 days). Returns calls + puts with IV, OI, volume.",
+            "InputSchema": {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "dte_target": {"type": "integer"},
+                    "strikes_width": {"type": "integer"},
+                },
+                "required": ["ticker"],
             },
         },
     ]
